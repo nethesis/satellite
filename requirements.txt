@@ -1,0 +1,7 @@
+python-dotenv
+aiohttp
+aiomqtt
+paho-mqtt==1.6.1
+deepgram-sdk==3.*
+pyaudio
+websockets>=11.0.3
