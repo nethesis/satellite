@@ -43,6 +43,7 @@ class DeepgramConnector:
         self.connected = False
         self.dg_connection = None
         self.loop = None
+        self.complete_call = []
 
     async def start(self):
         deepgram: DeepgramClient = DeepgramClient()
@@ -104,6 +105,7 @@ class DeepgramConnector:
             topic="transcription",
             payload=json.dumps(payload),
         )
+        self.complete_call.append(payload)
 
     def on_metadata(self, client, metadata, **kwargs):
         """
@@ -171,6 +173,15 @@ class DeepgramConnector:
         Close the connection to Deepgram
         """
         logger.debug(f"Closing Deepgram connection for {self.uniqueid}")
+        # publish complete call transcription
+        payload = {
+            "uniqueid": self.uniqueid,
+            "transcription": "",
+        }
+        for item in self.complete_call:
+            if item["is_final"]:
+                payload["transcription"] += item["transcription"] + "\n"
+        await self.mqtt_client.publish(topic="final_transcription", payload=json.dumps(payload))
         self.connected = False
         self.dg_connection.finalize()
         self.dg_connection._socket.close()
