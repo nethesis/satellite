@@ -208,32 +208,33 @@ class AsteriskBridge:
                 params={'channel': external_media_channel_id}
             )
 
-            # get external media channel port and create a stream
-            rtp_stream = await self.rtp_server.create_stream(self.channels[original_channel_id][f'rtp_source_port_{direction}'])
+            # if both bridge are created, start the deepgram connector
+            if 'bridge_in' in self.channels[original_channel_id] and 'bridge_out' in self.channels[original_channel_id]:
+                # get external media channel port and create a stream
+                rtp_stream_in = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port_in'])
+                rtp_stream_out = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port_out'])
+                speaker_name_in = self.channels[original_channel_id]['caller_name']
+                speaker_number_in = self.channels[original_channel_id]['caller_number']
+                speaker_name_out = self.channels[original_channel_id]['connected_name']
+                speaker_number_out = self.channels[original_channel_id]['connected_number']
 
-            # get the speaker name and number
-            if direction == 'in':
-                speaker_name = self.channels[original_channel_id]['connected_name']
-                speaker_number = self.channels[original_channel_id]['connected_number']
-            else:
-                speaker_name = self.channels[original_channel_id]['caller_name']
-                speaker_number = self.channels[original_channel_id]['caller_number']
+                # create a deepgram connector instance
+                self.channels[original_channel_id]['connector'] = DeepgramConnector(
+                    deepgram_api_key=os.getenv("DEEPGRAM_API_KEY"),
+                    rtp_stream_in=rtp_stream_in,
+                    rtp_stream_out=rtp_stream_out,
+                    mqtt_client=self.mqtt_client,
+                    uniqueid=original_channel_id,
+                    language=self.channels[original_channel_id]['language'],
+                    speaker_name_in=speaker_name_in,
+                    speaker_number_in=speaker_number_in,
+                    speaker_name_out=speaker_name_out,
+                    speaker_number_out=speaker_number_out
+                )
+                # start the deepgram connector
+                await self.channels[original_channel_id]['connector'].start()
 
-            # create a deepgram connector instance
-            self.channels[original_channel_id][f'connector_{direction}'] = DeepgramConnector(
-                deepgram_api_key=os.getenv("DEEPGRAM_API_KEY"),
-                rtp_stream=rtp_stream,
-                mqtt_client=self.mqtt_client,
-                uniqueid=original_channel_id,
-                language=self.channels[original_channel_id]['language'],
-                speaker_name=speaker_name,
-                speaker_number=speaker_number
-            )
-            # start the deepgram connector
-            await self.channels[original_channel_id][f'connector_{direction}'].start()
-
-            # If both connectors are created, return control of original channel to dialplan
-            if 'connector_in' in self.channels[original_channel_id] and 'connector_out' in self.channels[original_channel_id]:
+                # Return control of original channel to dialplan
                 await self._ari_request(
                     'POST',
                     f"/channels/{original_channel_id}/continue",
@@ -273,14 +274,13 @@ class AsteriskBridge:
         """Close a channel"""
         logger.debug(f"close_channel(channel_id={channel_id})")
         if channel_id in self.channels:
-            for direction in ['in', 'out']:
-                # Close the deepgram connector
-                if f'connector_{direction}' in self.channels[channel_id]:
-                    try:
-                        await self.channels[channel_id][f'connector_{direction}'].close()
-                    except Exception as e:
-                        logger.debug(f"Failed to close connector_{direction} for channel {channel_id}: {e}")
-                    del self.channels[channel_id][f'connector_{direction}']
+            # Close the deepgram connector
+            if 'connector' in self.channels[channel_id]:
+                try:
+                    await self.channels[channel_id]['connector'].close()
+                except Exception as e:
+                    logger.debug(f"Failed to close connector for channel {channel_id}: {e}")
+                del self.channels[channel_id][f'connector']
             for direction in ['in', 'out']:
                 # Remove the bridge
                 if f'bridge_{direction}' in self.channels[channel_id]:

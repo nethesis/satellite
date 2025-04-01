@@ -29,7 +29,7 @@ class RTPStreamReader:
     """
     def __init__(self):
         self._buffer = bytearray()  # Use bytearray instead of bytes for more efficient modifications
-        self._max_buffer_size = 32000  # Maximum buffer size (2 seconds at 8kHz/16-bit)
+        self._max_buffer_size = 51200  # Maximum buffer size in bytes
 
     def feed_data(self, data):
         """Add received audio data to the buffer"""

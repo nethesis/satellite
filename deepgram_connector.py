@@ -5,6 +5,7 @@ connect rtp stream with deepgram retrieving transcriptions and publishing it to 
 import asyncio
 import json
 import logging
+import numpy as np
 from deepgram import (
     DeepgramClient,
     DeepgramClientOptions,
@@ -22,7 +23,7 @@ class DeepgramConnector:
     - retrieve transcriptions
     - call transcription callback
     """
-    def __init__(self, deepgram_api_key, rtp_stream, mqtt_client, uniqueid, language="en", speaker_name=None, speaker_number=None):
+    def __init__(self, deepgram_api_key, rtp_stream_in, rtp_stream_out, mqtt_client, uniqueid, **kwargs):
         """
         Initialize Deepgram Connector
         :param deepgram_api_key: Deepgram API key
@@ -37,10 +38,13 @@ class DeepgramConnector:
         self.read_audio_from_rtp_task = None
         self.send_audio_to_deepgram_task = None
         self.get_transcription_task = None
-        self.rtp_stream = rtp_stream
-        self.language = language
-        self.speaker_name = speaker_name
-        self.speaker_number = speaker_number
+        self.rtp_stream_in = rtp_stream_in
+        self.rtp_stream_out = rtp_stream_out
+        self.language = kwargs.get("language", "en")
+        self.speaker_name_in = kwargs.get("speaker_name_in", None)
+        self.speaker_number_in = kwargs.get("speaker_number_in", None)
+        self.speaker_name_out = kwargs.get("speaker_name_out", None)
+        self.speaker_number_out = kwargs.get("speaker_number_out", None)
         self.audio_queue = asyncio.Queue(maxsize=100)
         self.connected = False
         self.dg_connection = None
@@ -61,7 +65,8 @@ class DeepgramConnector:
             punctuate=True,
             language=self.language,
             encoding="linear16",
-            channels=1,
+            multichannel=True,
+            channels=2,
             sample_rate=16000,
             ## To get UtteranceEnd, the following must be set:
             interim_results=True,
@@ -87,38 +92,31 @@ class DeepgramConnector:
             return
         #logger.debug(f"Transcription received: {result}")
         timestamp = result.start
-        logger.debug(f"Transcription {self.uniqueid} is_final: {result.is_final} speech_final: {result.speech_final} : {transcription}")
-        # Use the stored event loop to schedule the task
+        #logger.debug(f"Transcription {self.uniqueid} is_final: {result.is_final} speech_final: {result.speech_final} : {transcription}")
+        if result.channel_index[0] == 0:
+            speaker_name = self.speaker_name_in
+            speaker_number = self.speaker_number_in
+        else:
+            speaker_name = self.speaker_name_out
+            speaker_number = self.speaker_number_out
         try:
             self.loop.call_soon_threadsafe(
-               lambda: asyncio.create_task(
-                   self.publish_transcription(
-                       transcription,
-                       is_final=result.is_final,
-                       speech_final=result.speech_final,
-                       timestamp=timestamp
+                lambda: asyncio.create_task(
+                    self.mqtt_client.publish(
+                        topic='transcription',
+                        payload=json.dumps({
+                            "uniqueid": self.uniqueid,
+                            "transcription": transcription,
+                            "timestamp": timestamp,
+                            "speaker_name": speaker_name,
+                            "speaker_number": speaker_number,
+                            "is_final": result.is_final,
+                        })
                     )
                 )
             )
         except Exception as e:
                 logger.error(f"Failed to schedule transcription publishing: {e}")
-
-    async def publish_transcription(self, transcription, is_final=False, speech_final=False, **kwargs):
-        """Async helper to publish transcription to MQTT"""
-        payload = {
-            "uniqueid": self.uniqueid,
-            "transcription": transcription,
-            "is_final": is_final,
-            "speech_final": speech_final,
-            "speaker_name": self.speaker_name,
-            "speaker_number": self.speaker_number,
-            "timestamp": kwargs.get("timestamp", None),
-        }
-        await self.mqtt_client.publish(
-            topic="transcription",
-            payload=json.dumps(payload),
-        )
-        self.complete_call.append(payload)
 
     def on_metadata(self, client, metadata, **kwargs):
         """
@@ -150,12 +148,44 @@ class DeepgramConnector:
         """
         logger.debug(f"Reading audio from RTP stream for {self.uniqueid}")
         try:
+            target_size = 5120
+            timeout = 0.25 # 250ms timeout
             while self.connected:
-                audio_data = self.rtp_stream.reader.read(3200)  # Read 100ms of audio at 16kHz
-                if not audio_data:
+                # Read audio data from both streams till target size or timeout is reached
+                buffer_in = bytearray()
+                buffer_out = bytearray()
+                start_time = asyncio.get_event_loop().time()
+                while (len(buffer_in) < target_size and
+                       len(buffer_out) < target_size and
+                       (asyncio.get_event_loop().time() - start_time) < timeout):
+                    if len(buffer_in) < target_size:
+                        audio_data_in = self.rtp_stream_in.reader.read(320)
+                        if audio_data_in:
+                            buffer_in.extend(audio_data_in)
+                    if len(buffer_out) < target_size:
+                        audio_data_out = self.rtp_stream_out.reader.read(320)
+                        if audio_data_out:
+                            buffer_out.extend(audio_data_out)
+                # If we have no data in both buffers after timeout, wait and continue
+                if len(buffer_in) == 0 and len(buffer_out) == 0:
                     await asyncio.sleep(0.1)
                     continue
-                await self.audio_queue.put(audio_data)
+                # Convert buffers to numpy arrays
+                arr1 = np.frombuffer(buffer_in, dtype=np.int16)
+                arr2 = np.frombuffer(buffer_out, dtype=np.int16)
+
+                # Ensure arrays are the same size by padding the smaller one
+                if arr1.size != arr2.size:
+                    if arr1.size < arr2.size:
+                        arr1 = np.pad(arr1, (0, arr2.size - arr1.size), 'constant')
+                    else:
+                        arr2 = np.pad(arr2, (0, arr1.size - arr2.size), 'constant')
+                # Interleave the audio data
+                interleaved = np.empty((arr1.size + arr2.size,), dtype=np.int16)
+                interleaved[0::2] = arr1
+                interleaved[1::2] = arr2
+                # Put interleaved audio data into the queue
+                await self.audio_queue.put(interleaved.tobytes())
         except Exception as e:
             logger.error(f"Error reading audio from RTP stream: {e}")
             self.connected = False
@@ -186,15 +216,6 @@ class DeepgramConnector:
         Close the connection to Deepgram
         """
         logger.debug(f"Closing Deepgram connection for {self.uniqueid}")
-        # publish complete call transcription
-        payload = {
-            "uniqueid": self.uniqueid,
-            "transcription": "",
-        }
-        for item in self.complete_call:
-            if item["is_final"]:
-                payload["transcription"] += item["transcription"] + "\n"
-        await self.mqtt_client.publish(topic="final_transcription", payload=json.dumps(payload))
         self.connected = False
         self.dg_connection.finalize()
         self.dg_connection._socket.close()
