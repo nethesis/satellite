@@ -64,10 +64,12 @@ class MessageValidator:
         return True
 
 class MQTTClient:
-    def __init__(self, url, topic_prefix, reconnect_delay=5):
+    def __init__(self, url, topic_prefix, reconnect_delay=5, username=None, password=None):
         self.url = url
         self.topic_prefix = topic_prefix
         self.reconnect_delay = reconnect_delay
+        self.username = username
+        self.password = password
         self.client = None
         self.connected = False
         self.callback = None
@@ -95,7 +97,12 @@ class MQTTClient:
                 port = int(port)
 
                 # Create a persistent client connection
-                self.client = Client(hostname=host, port=port)
+                self.client = Client(
+                    hostname=host,
+                    port=port,
+                    username=self.username,
+                    password=self.password
+                )
                 await self.client.__aenter__()
                 self.connected = True
 

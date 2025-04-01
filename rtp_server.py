@@ -96,7 +96,6 @@ class RTPServer:
 
     async def create_stream(self, port: int):
         """Create a new stream for the given port"""
-        logger.debug(f"ENTER: create_stream(port={port})")
         if port in self.streams:
             logger.warning(f"Stream for port {port} already exists")
             return self.streams[port]
@@ -109,7 +108,6 @@ class RTPServer:
 
     def end_stream(self, port: int):
         """End the stream for the given port"""
-        logger.debug(f"ENTER: end_stream(port={port})")
         if port not in self.streams:
             logger.warning(f"Attempted to end non-existent stream for port {port}")
             return

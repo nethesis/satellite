@@ -129,29 +129,36 @@ class AsteriskBridge:
             # Normal channel entered Stasis
             self.channels[channel_id] = {}
             self.channels[channel_id]['language'] = channel.get('language', 'en')
-
-            # Create a snoop channel for it
-            snoop_data = await self._ari_request(
-                'POST',
-                f"/channels/{channel_id}/snoop",
-                params={
-                'spy': 'both',
-                'app': self.app,
-                'subscribeAll': 'yes',
-                'snoopId': 'snoop-' + channel_id,
-                }
-            )
-            snoop_channel_id = snoop_data['id']
-            self.channels[channel_id]['snoop_channel'] = snoop_channel_id
-            logger.debug(f"Snoop channel {snoop_channel_id} created")
+            self.channels[channel_id]['caller_name'] = channel['caller'].get('name', 'caller')
+            self.channels[channel_id]['caller_number'] = channel['caller'].get('number', 'unknown')
+            self.channels[channel_id]['connected_name'] = channel['connected'].get('name', 'connected')
+            self.channels[channel_id]['connected_number'] = channel['connected'].get('number', 'unknown')
+            logger.debug(f"Channel {channel_id} entered Satellite. Details: {channel}")
+            # Create a snoop channel for in and one for out
+            for direction in ['in', 'out']:
+                snoop_data = await self._ari_request(
+                    'POST',
+                    f"/channels/{channel_id}/snoop",
+                    params={
+                    'spy': direction,
+                    'app': self.app,
+                    'subscribeAll': 'yes',
+                    'snoopId': f'snoop-{direction}-{channel_id}'
+                    }
+                )
+                snoop_channel_id = snoop_data['id']
+                self.channels[channel_id][f'snoop_channel_{direction}'] = snoop_channel_id
+                logger.debug(f"Snoop channel {snoop_channel_id} created")
 
         if channel_id.startswith("snoop-"):
             # Snoop channel entered Stasis, create an external media channel for it
             snoop_channel_id = channel_id
             for id,values in self.channels.items():
-                if values.get('snoop_channel') == snoop_channel_id:
+                if values.get('snoop_channel_in') == snoop_channel_id or values.get('snoop_channel_out') == snoop_channel_id:
+                    # Find the original channel that created this snoop channel
                     original_channel_id = id
                     break
+            direction = 'in' if 'snoop-in' in snoop_channel_id else 'out'
             ext_media_response = await self._ari_request(
                 'POST',
                 f"/channels/externalMedia",
@@ -159,20 +166,22 @@ class AsteriskBridge:
                 'app': self.app,
                 'external_host': f"{self.rtp_server.host}:{self.rtp_server.port}",
                 'format': 'slin16',
-                'channelId': 'external-media-' + original_channel_id,
+                'channelId': f'external-media-{direction}-{original_channel_id}',
                 }
             )
-            logger.info(f"External media channel created: {ext_media_response}")
-            self.channels[original_channel_id]['external_media_channel'] = ext_media_response['id']
-            self.channels[original_channel_id]['rtp_source_port'] = ext_media_response['channelvars']['UNICASTRTP_LOCAL_PORT']
+            #logger.debug(f"External media channel created: {ext_media_response}")
+            self.channels[original_channel_id][f'external_media_channel_{direction}'] = ext_media_response['id']
+            self.channels[original_channel_id][f'rtp_source_port_{direction}'] = ext_media_response['channelvars']['UNICASTRTP_LOCAL_PORT']
 
         if channel_id.startswith("external-media-"):
             # External media channel entered Stasis
             for id,values in self.channels.items():
-                if values.get('external_media_channel') == channel_id:
+                if values.get('external_media_channel_in') == channel_id or values.get('external_media_channel_out') == channel_id:
+                    # Find the original channel that created this external media channel
                     original_channel_id = id
                     break
-            snoop_channel_id = self.channels[original_channel_id]['snoop_channel']
+            direction = 'in' if 'external-media-in' in channel_id else 'out'
+            snoop_channel_id = self.channels[original_channel_id][f'snoop_channel_{direction}']
             external_media_channel_id = channel_id
             # Create bridge
             bridge_data = await self._ari_request(
@@ -180,11 +189,11 @@ class AsteriskBridge:
                 "/bridges",
                 params={
                 'type': 'mixing',
-                'bridgeId': 'bridge-' + original_channel_id,
+                'bridgeId': f'bridge-{direction}-{original_channel_id}',
                 }
             )
             bridge_id = bridge_data['id']
-            self.channels[original_channel_id]['bridge'] = bridge_id
+            self.channels[original_channel_id][f'bridge_{direction}'] = bridge_id
             # Add channels to the bridge
             logger.debug(f"Adding channel {snoop_channel_id} to bridge {bridge_id}")
             await self._ari_request(
@@ -200,26 +209,37 @@ class AsteriskBridge:
             )
 
             # get external media channel port and create a stream
-            rtp_stream = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port'])
+            rtp_stream = await self.rtp_server.create_stream(self.channels[original_channel_id][f'rtp_source_port_{direction}'])
+
+            # get the speaker name and number
+            if direction == 'in':
+                speaker_name = self.channels[original_channel_id]['connected_name']
+                speaker_number = self.channels[original_channel_id]['connected_number']
+            else:
+                speaker_name = self.channels[original_channel_id]['caller_name']
+                speaker_number = self.channels[original_channel_id]['caller_number']
+
             # create a deepgram connector instance
-            deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")
-            self.channels[original_channel_id]['connector'] = DeepgramConnector(
-                deepgram_api_key=deepgram_api_key,
+            self.channels[original_channel_id][f'connector_{direction}'] = DeepgramConnector(
+                deepgram_api_key=os.getenv("DEEPGRAM_API_KEY"),
                 rtp_stream=rtp_stream,
                 mqtt_client=self.mqtt_client,
                 uniqueid=original_channel_id,
                 language=self.channels[original_channel_id]['language'],
+                speaker_name=speaker_name,
+                speaker_number=speaker_number
             )
             # start the deepgram connector
-            await self.channels[original_channel_id]['connector'].start()
+            await self.channels[original_channel_id][f'connector_{direction}'].start()
 
-            # Return the original channel to the dialplan
-            await self._ari_request(
-                'POST',
-                f"/channels/{original_channel_id}/continue",
-                params={}
-            )
-            logger.info(f"Channel {original_channel_id} returned to dialplan")
+            # If both connectors are created, return control of original channel to dialplan
+            if 'connector_in' in self.channels[original_channel_id] and 'connector_out' in self.channels[original_channel_id]:
+                await self._ari_request(
+                    'POST',
+                    f"/channels/{original_channel_id}/continue",
+                    params={}
+                )
+                logger.info(f"Channel {original_channel_id} returned to dialplan")
 
     async def _handle_stasis_end(self, event):
         """Handle channel hangup event"""
@@ -236,12 +256,12 @@ class AsteriskBridge:
         logger.debug(f"_handle_channel_left_bridge(channel_id={channel_id})")
         original_channel_id = None
         for id, values in self.channels.items():
-            if values.get('snoop_channel') == channel_id:
+            if values.get('snoop_channel_in') == channel_id or values.get('snoop_channel_out') == channel_id:
                 # Snoop channel left the bridge
                 logger.debug(f"Snoop channel {channel_id} left the bridge")
                 original_channel_id = id
                 break
-            if values.get('external_media_channel') == channel_id:
+            if values.get('external_media_channel_in') == channel_id or values.get('external_media_channel_out') == channel_id:
                 # External media channel left the bridge
                 logger.debug(f"External media channel {channel_id} left the bridge")
                 original_channel_id = id
@@ -253,47 +273,52 @@ class AsteriskBridge:
         """Close a channel"""
         logger.debug(f"close_channel(channel_id={channel_id})")
         if channel_id in self.channels:
-            # Close the deepgram connector
-            if 'connector' in self.channels[channel_id]:
-                try:
-                    await self.channels[channel_id]['connector'].close()
-                except Exception as e:
-                    logger.debug(f"Failed to close connector for channel {channel_id}: {e}")
-                del self.channels[channel_id]['connector']
-            # Remove the bridge
-            if 'bridge' in self.channels[channel_id]:
-                try:
-                    await self._ari_request(
-                        'DELETE',
-                        f"/bridges/{self.channels[channel_id]['bridge']}"
-                    )
-                except Exception as e:
-                    logger.debug(f"Failed to delete bridge {self.channels[channel_id]['bridge']}: {e}")
-                del self.channels[channel_id]['bridge']
-            # Remove the external media channel
-            if 'external_media_channel' in self.channels[channel_id]:
-                try:
-                    await self._ari_request(
-                        'DELETE',
-                        f"/channels/{self.channels[channel_id]['external_media_channel']}"
-                    )
-                except Exception as e:
-                    logger.debug(f"Failed to delete external media channel {self.channels[channel_id]['external_media_channel']}: {e}")
-                del self.channels[channel_id]['external_media_channel']
-            # Remove the snoop channel
-            if 'snoop_channel' in self.channels[channel_id]:
-                try:
-                    await self._ari_request(
-                        'DELETE',
-                        f"/channels/{self.channels[channel_id]['snoop_channel']}"
-                    )
-                except Exception as e:
-                    logger.debug(f"Failed to delete snoop channel {self.channels[channel_id]['snoop_channel']}: {e}")
-                del self.channels[channel_id]['snoop_channel']
-            # Remove the RTP stream
-            if 'rtp_source_port' in self.channels[channel_id]:
-                self.rtp_server.end_stream(self.channels[channel_id]['rtp_source_port'])
-                del self.channels[channel_id]['rtp_source_port']
+            for direction in ['in', 'out']:
+                # Close the deepgram connector
+                if f'connector_{direction}' in self.channels[channel_id]:
+                    try:
+                        await self.channels[channel_id][f'connector_{direction}'].close()
+                    except Exception as e:
+                        logger.debug(f"Failed to close connector_{direction} for channel {channel_id}: {e}")
+                    del self.channels[channel_id][f'connector_{direction}']
+            for direction in ['in', 'out']:
+                # Remove the bridge
+                if f'bridge_{direction}' in self.channels[channel_id]:
+                    try:
+                        await self._ari_request(
+                            'DELETE',
+                            f"/bridges/{self.channels[channel_id][f'bridge_{direction}']}"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to delete bridge {self.channels[channel_id][f'bridge_{direction}']}: {e}")
+                    del self.channels[channel_id][f'bridge_{direction}']
+            for direction in ['in', 'out']:
+                # Remove the external media channel
+                if f'external_media_channel_{direction}' in self.channels[channel_id]:
+                    try:
+                        await self._ari_request(
+                            'DELETE',
+                            f"/channels/{self.channels[channel_id][f'external_media_channel_{direction}']}"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to delete external media channel {self.channels[channel_id][f'external_media_channel_{direction}']}: {e}")
+                    del self.channels[channel_id][f'external_media_channel_{direction}']
+            for direction in ['in', 'out']:
+                # Remove the snoop channel
+                if f'snoop_channel_{direction}' in self.channels[channel_id]:
+                    try:
+                        await self._ari_request(
+                            'DELETE',
+                            f"/channels/{self.channels[channel_id][f'snoop_channel_{direction}']}"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to delete snoop channel {self.channels[channel_id][f'snoop_channel_{direction}']}: {e}")
+                    del self.channels[channel_id][f'snoop_channel_{direction}']
+            for direction in ['in', 'out']:
+                # Remove the RTP stream
+                if f'rtp_source_port_{direction}' in self.channels[channel_id]:
+                    self.rtp_server.end_stream(self.channels[channel_id][f'rtp_source_port_{direction}'])
+                    del self.channels[channel_id][f'rtp_source_port_{direction}']
             del self.channels[channel_id]
 
     async def _handle_channel_hangup(self, event):

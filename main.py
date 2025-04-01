@@ -45,6 +45,8 @@ async def main():
 
     mqtt_url = os.getenv("MQTT_URL", "mqtt://localhost:1883")
     mqtt_topic_prefix = os.getenv("MQTT_TOPIC_PREFIX", "asterisk-dialogflow")
+    mqtt_username = os.getenv("MQTT_USERNAME")
+    mqtt_password = os.getenv("MQTT_PASSWORD")
 
     # create an RTP server instance
     rtp_host = os.getenv("RTP_HOST", "0.0.0.0")
@@ -55,7 +57,12 @@ async def main():
     await rtp_server.start()
 
     # Create instances
-    mqtt_client = MQTTClient(url=mqtt_url, topic_prefix=mqtt_topic_prefix)
+    mqtt_client = MQTTClient(
+        url=mqtt_url,
+        topic_prefix=mqtt_topic_prefix,
+        username=mqtt_username,
+        password=mqtt_password
+    )
     asterisk_bridge = AsteriskBridge(
         url=asterisk_url,
         app=asterisk_app,

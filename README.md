@@ -101,3 +101,70 @@ When a call enters the Stasis application in Asterisk:
 The application publishes transcription results to the following MQTT topic:
 - `transcription`: Contains JSON with transcript text, channel ID, and flags for final/interim results
 
+## Testing
+
+Set variables
+```
+export ASTERISK_URL=http://127.0.0.1:8088
+export ARI_APP=satellite
+export ARI_USERNAME=satellite
+export ARI_PASSWORD=aripassword
+export ASTERISK_FORMAT=slin16
+export RTP_HOST=0.0.0.0
+export RTP_PORT=10000
+export RTP_SWAP16=true
+export RTP_HEADER_SIZE=12
+export MQTT_URL=mqtt://127.0.0.1:1883
+export MQTT_TOPIC_PREFIX=satellite
+export MQTT_USERNAME=mqttuser
+export MQTT_PASSWORD=mqttpass
+export DEEPGRAM_API_KEY=XXX
+```
+
+### MQTT Broker
+
+Create MQTT password file
+```
+podman run -it docker.io/library/eclipse-mosquitto sh -c 'touch /mosquitto_passwd ; chmod 0700 /mosquitto_passwd ; mosquitto_passwd -b /mosquitto_passwd '$MQTT_USERNAME' '$MQTT_PASSWORD'; cat /mosquitto_passwd' > ./mosquitto_passwd
+```
+Create MQTT config
+```
+cat << EOF > mosquitto.conf
+password_file /mosquitto_passwd
+allow_anonymous false
+listener $MQTT_PORT
+EOF
+```
+Run MQTT broker
+```
+podman run -d --name mqtt --replace -v=./mosquitto_passwd:/mosquitto_passwd:Z -v=./mosquitto.conf:/mosquitto/config/mosquitto.conf:Z --network=host docker.io/library/eclipse-mosquitto
+```
+
+### Asterisk
+
+in Asterisk dialplan, add this before the dial command
+```
+exten => s,n,Stasis(satellite,${EXTEN})
+```
+in /etc/asterisk/ari.conf
+```
+[satellite]
+type=user
+password=$ARI_PASSWORD
+password_format=plain
+read_only=no
+```
+Also make sure that asterisk http server is enabled on port specified in ASTETRISK_URL
+
+### Satellite
+
+Run the application
+```
+git clone ... && cd satellite
+python main.py
+```
+
+Run the docker container
+```
+podman run -e ASTERISK_URL -e MQTT_URL -e DEEPGRAM_API_KEY ... satellite
+```

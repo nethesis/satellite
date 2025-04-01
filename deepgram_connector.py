@@ -22,7 +22,7 @@ class DeepgramConnector:
     - retrieve transcriptions
     - call transcription callback
     """
-    def __init__(self, deepgram_api_key, rtp_stream, mqtt_client, uniqueid, language="en"):
+    def __init__(self, deepgram_api_key, rtp_stream, mqtt_client, uniqueid, language="en", speaker_name=None, speaker_number=None):
         """
         Initialize Deepgram Connector
         :param deepgram_api_key: Deepgram API key
@@ -39,6 +39,8 @@ class DeepgramConnector:
         self.get_transcription_task = None
         self.rtp_stream = rtp_stream
         self.language = language
+        self.speaker_name = speaker_name
+        self.speaker_number = speaker_number
         self.audio_queue = asyncio.Queue(maxsize=100)
         self.connected = False
         self.dg_connection = None
@@ -83,12 +85,20 @@ class DeepgramConnector:
         if len(transcription) == 0:
             #logger.debug("Empty transcription received")
             return
-
+        #logger.debug(f"Transcription received: {result}")
+        timestamp = result.start
         logger.debug(f"Transcription {self.uniqueid} is_final: {result.is_final} speech_final: {result.speech_final} : {transcription}")
         # Use the stored event loop to schedule the task
         try:
             self.loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self.publish_transcription(transcription, is_final=result.is_final, speech_final=result.speech_final))
+               lambda: asyncio.create_task(
+                   self.publish_transcription(
+                       transcription,
+                       is_final=result.is_final,
+                       speech_final=result.speech_final,
+                       timestamp=timestamp
+                    )
+                )
             )
         except Exception as e:
                 logger.error(f"Failed to schedule transcription publishing: {e}")
@@ -100,6 +110,9 @@ class DeepgramConnector:
             "transcription": transcription,
             "is_final": is_final,
             "speech_final": speech_final,
+            "speaker_name": self.speaker_name,
+            "speaker_number": self.speaker_number,
+            "timestamp": kwargs.get("timestamp", None),
         }
         await self.mqtt_client.publish(
             topic="transcription",
