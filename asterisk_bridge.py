@@ -210,30 +210,32 @@ class AsteriskBridge:
 
             # if both bridge are created, start the deepgram connector
             if 'bridge_in' in self.channels[original_channel_id] and 'bridge_out' in self.channels[original_channel_id]:
-                # get external media channel port and create a stream
-                rtp_stream_in = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port_in'])
-                rtp_stream_out = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port_out'])
                 speaker_name_in = self.channels[original_channel_id]['caller_name']
                 speaker_number_in = self.channels[original_channel_id]['caller_number']
                 speaker_name_out = self.channels[original_channel_id]['connected_name']
                 speaker_number_out = self.channels[original_channel_id]['connected_number']
-
-                # create a deepgram connector instance
-                self.channels[original_channel_id]['connector'] = DeepgramConnector(
-                    deepgram_api_key=os.getenv("DEEPGRAM_API_KEY"),
-                    rtp_stream_in=rtp_stream_in,
-                    rtp_stream_out=rtp_stream_out,
-                    mqtt_client=self.mqtt_client,
-                    uniqueid=original_channel_id,
-                    language=self.channels[original_channel_id]['language'],
-                    speaker_name_in=speaker_name_in,
-                    speaker_number_in=speaker_number_in,
-                    speaker_name_out=speaker_name_out,
-                    speaker_number_out=speaker_number_out
-                )
-                # start the deepgram connector
-                await self.channels[original_channel_id]['connector'].start()
-
+                try:
+                    # get external media channel port and create a stream
+                    rtp_stream_in = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port_in'])
+                    rtp_stream_out = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port_out'])
+                    # create a deepgram connector instance
+                    self.channels[original_channel_id]['connector'] = DeepgramConnector(
+                        deepgram_api_key=os.getenv("DEEPGRAM_API_KEY"),
+                        rtp_stream_in=rtp_stream_in,
+                        rtp_stream_out=rtp_stream_out,
+                        mqtt_client=self.mqtt_client,
+                        uniqueid=original_channel_id,
+                        language=self.channels[original_channel_id]['language'],
+                        speaker_name_in=speaker_name_in,
+                        speaker_number_in=speaker_number_in,
+                        speaker_name_out=speaker_name_out,
+                        speaker_number_out=speaker_number_out
+                    )
+                    # start the deepgram connector
+                    await self.channels[original_channel_id]['connector'].start()
+                except Exception as e:
+                    logger.error(f"Failed to start connector for channel {original_channel_id}: {e}")
+                    self.close_channel(original_channel_id)
                 # Return control of original channel to dialplan
                 await self._ari_request(
                     'POST',
@@ -303,17 +305,6 @@ class AsteriskBridge:
                     except Exception as e:
                         logger.debug(f"Failed to delete external media channel {self.channels[channel_id][f'external_media_channel_{direction}']}: {e}")
                     del self.channels[channel_id][f'external_media_channel_{direction}']
-            for direction in ['in', 'out']:
-                # Remove the snoop channel
-                if f'snoop_channel_{direction}' in self.channels[channel_id]:
-                    try:
-                        await self._ari_request(
-                            'DELETE',
-                            f"/channels/{self.channels[channel_id][f'snoop_channel_{direction}']}"
-                        )
-                    except Exception as e:
-                        logger.debug(f"Failed to delete snoop channel {self.channels[channel_id][f'snoop_channel_{direction}']}: {e}")
-                    del self.channels[channel_id][f'snoop_channel_{direction}']
             for direction in ['in', 'out']:
                 # Remove the RTP stream
                 if f'rtp_source_port_{direction}' in self.channels[channel_id]:

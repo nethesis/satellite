@@ -52,8 +52,8 @@ class DeepgramConnector:
         self.complete_call = []
 
     async def start(self):
-        deepgram: DeepgramClient = DeepgramClient()
-        self.dg_connection = deepgram.listen.websocket.v("1")
+        deepgram: DeepgramClient = DeepgramClient(self.deepgram_api_key)
+        self.dg_connection = deepgram.listen.asyncwebsocket.v("1")
         self.dg_connection.on(LiveTranscriptionEvents.Transcript, self.on_message)
         self.dg_connection.on(LiveTranscriptionEvents.Metadata, self.on_metadata)
         self.dg_connection.on(LiveTranscriptionEvents.Error, self.on_error)
@@ -73,7 +73,7 @@ class DeepgramConnector:
             utterance_end_ms="1000",
             vad_events=True,
         )
-        if self.dg_connection.start(options) is False:
+        if await self.dg_connection.start(options) is False:
             logger.error("Failed to start connection")
             return
 
@@ -81,7 +81,7 @@ class DeepgramConnector:
         self.read_audio_from_rtp_task = asyncio.create_task(self.read_audio_from_rtp())
         self.send_audio_to_deepgram_task = asyncio.create_task(self.send_audio_to_deepgram())
 
-    def on_message(self, client, result, **kwargs):
+    async def on_message(self, client, result, **kwargs):
         """
         Send transcription to mqtt
         """
@@ -100,21 +100,17 @@ class DeepgramConnector:
             speaker_name = self.speaker_name_out
             speaker_number = self.speaker_number_out
         try:
-            self.loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(
-                    self.mqtt_client.publish(
-                        topic='transcription',
-                        payload=json.dumps({
-                            "uniqueid": self.uniqueid,
-                            "transcription": transcription,
-                            "timestamp": timestamp,
-                            "speaker_name": speaker_name,
-                            "speaker_number": speaker_number,
-                            "is_final": result.is_final,
-                        })
-                    )
+            await self.mqtt_client.publish(
+                    topic='transcription',
+                    payload=json.dumps({
+                        "uniqueid": self.uniqueid,
+                        "transcription": transcription,
+                        "timestamp": timestamp,
+                        "speaker_name": speaker_name,
+                        "speaker_number": speaker_number,
+                        "is_final": result.is_final,
+                    })
                 )
-            )
         except Exception as e:
                 logger.error(f"Failed to schedule transcription publishing: {e}")
 
@@ -205,7 +201,7 @@ class DeepgramConnector:
                 if audio_data is None:
                     await asyncio.sleep(0.1)
                     continue
-                self.dg_connection.send(audio_data)
+                await self.dg_connection.send(audio_data)
         except Exception as e:
             logger.error(f"Error sending audio to Deepgram: {e}")
             self.connected = False
@@ -217,7 +213,7 @@ class DeepgramConnector:
         """
         logger.debug(f"Closing Deepgram connection for {self.uniqueid}")
         self.connected = False
-        self.dg_connection.finalize()
-        self.dg_connection._socket.close()
+        await self.dg_connection.finalize()
+        await self.dg_connection._socket.close()
         self.read_audio_from_rtp_task.cancel()
         self.send_audio_to_deepgram_task.cancel()
