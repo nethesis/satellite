@@ -1,6 +1,8 @@
 aiohttp
 aiomqtt
 deepgram-sdk==3.*
+langchain
+langchain_openai
 numpy
 paho-mqtt==1.6.1
 python-dotenv

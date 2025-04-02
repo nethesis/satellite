@@ -12,8 +12,10 @@ from rtp_server import RTPServer
 load_dotenv(dotenv_path=".env")
 
 # Configure logging
+log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
 )
 logger = logging.getLogger("main")
@@ -26,6 +28,11 @@ def signal_handler():
     shutdown_event.set()
 
 async def main():
+    # exit if deepgram api key is not set
+    if not os.getenv("DEEPGRAM_API_KEY"):
+        logger.error("DEEPGRAM_API_KEY is not set")
+        return
+
     # Set up signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

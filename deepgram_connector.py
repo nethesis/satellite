@@ -111,6 +111,16 @@ class DeepgramConnector:
                         "is_final": result.is_final,
                     })
                 )
+            # save the transcription to the complete_call if it is final
+            if result.is_final:
+                self.complete_call.append({
+                    "uniqueid": self.uniqueid,
+                    "transcription": transcription,
+                    "timestamp": timestamp,
+                    "speaker_name": speaker_name,
+                    "speaker_number": speaker_number,
+                    "is_final": result.is_final,
+                })
         except Exception as e:
                 logger.error(f"Failed to schedule transcription publishing: {e}")
 
@@ -217,3 +227,41 @@ class DeepgramConnector:
         await self.dg_connection._socket.close()
         self.read_audio_from_rtp_task.cancel()
         self.send_audio_to_deepgram_task.cancel()
+        # publish full conversation to mqtt
+        text = ""
+        last_speaker = None
+        for message in self.complete_call:
+            if last_speaker != message["speaker_name"]:
+                text += f'\n{message["speaker_name"]}: '
+            text += f'{message["transcription"]}\n'
+            last_speaker = message["speaker_name"]
+
+        # publish the full conversation to mqtt
+        await self.mqtt_client.publish(
+            topic='final',
+            payload=json.dumps({
+                "uniqueid": self.uniqueid,
+                "raw_transcription": text
+            })
+        )
+        try:
+            from ai import get_summary, get_clean
+            clean_text = get_clean(text)
+            await self.mqtt_client.publish(
+                topic='final',
+                payload=json.dumps({
+                    "uniqueid": self.uniqueid,
+                    "clean_transcription": clean_text
+                })
+            )
+            summary = get_summary(text)
+            await self.mqtt_client.publish(
+                topic='final',
+                payload=json.dumps({
+                    "uniqueid": self.uniqueid,
+                    "summary": summary
+                })
+            )
+        except Exception as e:
+            logger.error(f"Error processing transcription: {e}")
+
