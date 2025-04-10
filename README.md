@@ -35,7 +35,7 @@ Create a `.env` file in the root directory with the following configuration para
 ASTERISK_URL=http://127.0.0.1:8088
 ARI_APP=satellite
 ARI_USERNAME=satellite
-ARI_PASSWORD=your_password
+SATELLITE_ARI_PASSWORD=your_password
 ASTERISK_FORMAT=slin16
 
 # RTP Server Configuration
@@ -64,7 +64,7 @@ LOG_LEVEL=DEBUG
 - `ASTERISK_URL`: URL of your Asterisk ARI server
 - `ARI_APP`: Stasis application name
 - `ARI_USERNAME`: ARI username
-- `ARI_PASSWORD`: ARI password
+- `SATELLITE_ARI_PASSWORD`: ARI password
 - `ASTERISK_FORMAT`: Audio format (slin16 for 16-bit signed linear PCM)
 
 #### RTP Server Configuration
@@ -116,7 +116,7 @@ Set variables
 export ASTERISK_URL=http://127.0.0.1:8088
 export ARI_APP=satellite
 export ARI_USERNAME=satellite
-export ARI_PASSWORD=aripassword
+export SATELLITE_ARI_PASSWORD=aripassword
 export ASTERISK_FORMAT=slin16
 export RTP_HOST=0.0.0.0
 export RTP_PORT=10000
@@ -158,7 +158,7 @@ in /etc/asterisk/ari.conf
 ```
 [satellite]
 type=user
-password=$ARI_PASSWORD
+password=$SATELLITE_ARI_PASSWORD
 password_format=plain
 read_only=no
 ```

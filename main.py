@@ -48,7 +48,7 @@ async def main():
     asterisk_url = os.getenv("ASTERISK_URL", "http://localhost:8088")
     asterisk_app = os.getenv("ARI_APP", "asterisk_dialogflow")
     asterisk_username = os.getenv("ARI_USERNAME", "asterisk")
-    asterisk_password = os.getenv("ARI_PASSWORD", "asterisk")
+    asterisk_password = os.getenv("SATELLITE_ARI_PASSWORD", "asterisk")
 
     mqtt_url = os.getenv("MQTT_URL", "mqtt://localhost:1883")
     mqtt_topic_prefix = os.getenv("MQTT_TOPIC_PREFIX", "asterisk-dialogflow")
