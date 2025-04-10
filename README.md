@@ -1,6 +1,7 @@
 # Satellite
 
 Satellite is a Python application that creates a bridge between Asterisk PBX and Deepgram speech recognition services. It connects to Asterisk ARI (Asterisk REST Interface) and waits for channels to enter stasis. When a channel enters stasis with the application name "satellite", it creates a snoop channel and sends external media to its RTP server address. The RTP server distinguishes various channels from the UDP source port, captures the audio, and forwards it to Deepgram for real-time speech-to-text transcription. Transcription results are then published to an MQTT broker for further processing.
+If OpenAI API key is provided, it will be used to generate a summary of the transcriptions.
 
 ## Features
 
@@ -49,6 +50,12 @@ MQTT_TOPIC_PREFIX=satellite
 
 # Deepgram API Key
 DEEPGRAM_API_KEY=your_deepgram_api_key
+
+# OpenAI API Key (optional)
+OPENAI_API_KEY=your_openai_api_key
+
+# Log level (optional)
+LOG_LEVEL=DEBUG
 ```
 
 ### Configuration Parameters
@@ -88,6 +95,7 @@ Satellite consists of several key components:
 2. **RTPServer**: Receives and processes RTP audio streams
 3. **MQTTClient**: Publishes transcription results to MQTT
 4. **DeepgramConnector**: Streams audio to Deepgram and receives transcriptions
+5. **AI**: (optional) Generates summaries of transcriptions using OpenAI API
 
 When a call enters the Stasis application in Asterisk:
 1. A snoop channel is created to capture audio
@@ -117,7 +125,7 @@ export RTP_HEADER_SIZE=12
 export MQTT_URL=mqtt://127.0.0.1:1883
 export MQTT_TOPIC_PREFIX=satellite
 export MQTT_USERNAME=mqttuser
-export MQTT_PASSWORD=mqttpass
+export SATELLITE_MQTT_PASSWORD=mqttpass
 export DEEPGRAM_API_KEY=XXX
 ```
 
@@ -125,7 +133,7 @@ export DEEPGRAM_API_KEY=XXX
 
 Create MQTT password file
 ```
-podman run -it docker.io/library/eclipse-mosquitto sh -c 'touch /mosquitto_passwd ; chmod 0700 /mosquitto_passwd ; mosquitto_passwd -b /mosquitto_passwd '$MQTT_USERNAME' '$MQTT_PASSWORD'; cat /mosquitto_passwd' > ./mosquitto_passwd
+podman run -it docker.io/library/eclipse-mosquitto sh -c 'touch /mosquitto_passwd ; chmod 0700 /mosquitto_passwd ; mosquitto_passwd -b /mosquitto_passwd '$MQTT_USERNAME' '$SATELLITE_MQTT_PASSWORD'; cat /mosquitto_passwd' > ./mosquitto_passwd
 ```
 Create MQTT config
 ```
@@ -168,3 +176,6 @@ Run the docker container
 ```
 podman run -e ASTERISK_URL -e MQTT_URL -e DEEPGRAM_API_KEY ... satellite
 ```
+
+## License
+This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for details.

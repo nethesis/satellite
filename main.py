@@ -53,7 +53,7 @@ async def main():
     mqtt_url = os.getenv("MQTT_URL", "mqtt://localhost:1883")
     mqtt_topic_prefix = os.getenv("MQTT_TOPIC_PREFIX", "asterisk-dialogflow")
     mqtt_username = os.getenv("MQTT_USERNAME")
-    mqtt_password = os.getenv("MQTT_PASSWORD")
+    mqtt_password = os.getenv("SATELLITE_MQTT_PASSWORD")
 
     # create an RTP server instance
     rtp_host = os.getenv("RTP_HOST", "0.0.0.0")
