@@ -125,7 +125,7 @@ class AsteriskBridge:
         #logger.debug(f"ENTER: _handle_stasis_start(channel_id={channel_id})")
         #logger.debug(f"Channel data: {channel}")
 
-        if not channel_id.startswith("snoop-") and not channel_id.startswith("external-media-"):
+        if not channel_id.startswith("snoop-") and not channel_id.startswith("ext-media-"):
             # Normal channel entered Stasis
             self.channels[channel_id] = {}
             self.channels[channel_id]['language'] = channel.get('language', 'en')
@@ -166,21 +166,21 @@ class AsteriskBridge:
                 'app': self.app,
                 'external_host': f"{self.rtp_server.host}:{self.rtp_server.port}",
                 'format': 'slin16',
-                'channelId': f'external-media-{direction}-{original_channel_id}',
+                'channelId': f'ext-media-{direction}-{original_channel_id}',
                 }
             )
             #logger.debug(f"External media channel created: {ext_media_response}")
             self.channels[original_channel_id][f'external_media_channel_{direction}'] = ext_media_response['id']
             self.channels[original_channel_id][f'rtp_source_port_{direction}'] = ext_media_response['channelvars']['UNICASTRTP_LOCAL_PORT']
 
-        if channel_id.startswith("external-media-"):
+        if channel_id.startswith("ext-media-"):
             # External media channel entered Stasis
             for id,values in self.channels.items():
                 if values.get('external_media_channel_in') == channel_id or values.get('external_media_channel_out') == channel_id:
                     # Find the original channel that created this external media channel
                     original_channel_id = id
                     break
-            direction = 'in' if 'external-media-in' in channel_id else 'out'
+            direction = 'in' if 'ext-media-in' in channel_id else 'out'
             snoop_channel_id = self.channels[original_channel_id][f'snoop_channel_{direction}']
             external_media_channel_id = channel_id
             # Create bridge
