@@ -3,6 +3,9 @@ import logging
 import os
 import signal
 from dotenv import load_dotenv
+import threading
+import uvicorn
+from api import app as api_app
 from asterisk_bridge import AsteriskBridge
 from mqtt_client import MQTTClient
 from rtp_server import RTPServer
@@ -27,7 +30,7 @@ def signal_handler():
     logger.info("Shutdown signal received")
     shutdown_event.set()
 
-async def main():
+async def realtime_call_transcription():
     # exit if deepgram api key is not set
     if not os.getenv("DEEPGRAM_API_KEY"):
         logger.error("DEEPGRAM_API_KEY is not set")
@@ -97,5 +100,14 @@ async def main():
     logger.info("Shutdown complete")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Start API server in a background thread
+    server_thread = threading.Thread(
+        target=uvicorn.run,
+        args=(api_app,),
+        kwargs={"host": "0.0.0.0", "port": int(os.getenv("HTTP_PORT", "8000")), "log_level": os.getenv("LOG_LEVEL", "info").lower()},
+        daemon=True
+    )
+    server_thread.start()
+    # Run the realtime call transcription pipeline
+    asyncio.run(realtime_call_transcription())
 

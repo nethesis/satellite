@@ -80,6 +80,9 @@ LOG_LEVEL=DEBUG
 #### Deepgram Configuration
 - `DEEPGRAM_API_KEY`: Your Deepgram API key
 
+#### Rest API Configuration
+- `HTTP_PORT`: Port for the HTTP server (default: 8000)
+
 ## Usage
 
 1. Ensure Asterisk is configured with the appropriate ARI settings
@@ -127,6 +130,7 @@ export MQTT_TOPIC_PREFIX=satellite
 export MQTT_USERNAME=mqttuser
 export SATELLITE_MQTT_PASSWORD=mqttpass
 export DEEPGRAM_API_KEY=XXX
+export HTTP_PORT=8080
 ```
 
 ### MQTT Broker
