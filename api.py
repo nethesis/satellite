@@ -20,7 +20,7 @@ async def get_transcription(file: UploadFile = File(...)):
 
     params = {
         "model": "nova-3",
-        "smart_format": "true"
+        "detect_language": "true"
     }
 
     try:
