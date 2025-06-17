@@ -124,6 +124,16 @@ class AsteriskBridge:
         channel_id = channel['id']
         #logger.debug(f"ENTER: _handle_stasis_start(channel_id={channel_id})")
         #logger.debug(f"Channel data: {channel}")
+        if channel_id in self.channels:
+            logger.debug(f"Channel {channel_id} already in channels")
+            # continue the channel
+            await self._ari_request(
+                'POST',
+                f"/channels/{channel_id}/continue",
+                params={}
+            )
+            logger.info(f"Channel {channel_id} returned to dialplan")
+            return
 
         if not channel_id.startswith("snoop-") and not channel_id.startswith("ext-media-"):
             # Normal channel entered Stasis
