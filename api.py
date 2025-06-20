@@ -40,7 +40,11 @@ async def get_transcription(file: UploadFile = File(...)):
     result = response.json()
     try:
         transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
+        if "detected_language" in result["results"]["channels"][0]:
+            detected_language = result["results"]["channels"][0]["detected_language"]
+        else:
+            detected_language = None
     except (KeyError, IndexError):
         raise HTTPException(status_code=500, detail="Failed to parse transcription response.")
 
-    return {"transcript": transcript}
+    return {"transcript": transcript, "detected_language": detected_language}
