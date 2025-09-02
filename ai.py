@@ -6,7 +6,7 @@ def get_summary(text):
     """
     Generate a summary of the given text
     """
-    llm = ChatOpenAI(temperature=0, model_name="gpt-4o-mini")
+    llm = ChatOpenAI(temperature=0.3, model="gpt-5-mini")
     prompt = ChatPromptTemplate.from_messages([
         ("system", """"
 The provided text is a transcription of a conversation.
@@ -28,7 +28,7 @@ def get_clean(text):
     """
     Cleanup the given text
     """
-    llm = ChatOpenAI(temperature=0, model_name="gpt-4o-mini")
+    llm = ChatOpenAI(temperature=0.3, model="gpt-5-mini")
     prompt = ChatPromptTemplate.from_messages([
         ("system", """"
 The provided text is a transcription of a conversation.
