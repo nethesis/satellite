@@ -96,9 +96,13 @@ class DeepgramConnector:
         if result.channel_index[0] == 0:
             speaker_name = self.speaker_name_in
             speaker_number = self.speaker_number_in
+            speaker_counterpart_name = self.speaker_name_out
+            speaker_counterpart_number = self.speaker_number_out
         else:
             speaker_name = self.speaker_name_out
             speaker_number = self.speaker_number_out
+            speaker_counterpart_name = self.speaker_name_in
+            speaker_counterpart_number = self.speaker_number_in
         try:
             await self.mqtt_client.publish(
                     topic='transcription',
@@ -108,6 +112,8 @@ class DeepgramConnector:
                         "timestamp": timestamp,
                         "speaker_name": speaker_name,
                         "speaker_number": speaker_number,
+                        "speaker_counterpart_name": speaker_counterpart_name,
+                        "speaker_counterpart_number": speaker_counterpart_number,
                         "is_final": result.is_final,
                     })
                 )
@@ -119,6 +125,8 @@ class DeepgramConnector:
                     "timestamp": timestamp,
                     "speaker_name": speaker_name,
                     "speaker_number": speaker_number,
+                    "speaker_counterpart_name": speaker_counterpart_name,
+                    "speaker_counterpart_number": speaker_counterpart_number,
                     "is_final": result.is_final,
                 })
         except Exception as e:
