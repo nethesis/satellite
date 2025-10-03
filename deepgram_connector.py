@@ -96,9 +96,13 @@ class DeepgramConnector:
         if result.channel_index[0] == 0:
             speaker_name = self.speaker_name_in
             speaker_number = self.speaker_number_in
+            speaker_counterpart_name = self.speaker_name_out
+            speaker_counterpart_number = self.speaker_number_out
         else:
             speaker_name = self.speaker_name_out
             speaker_number = self.speaker_number_out
+            speaker_counterpart_name = self.speaker_name_in
+            speaker_counterpart_number = self.speaker_number_in
         try:
             await self.mqtt_client.publish(
                     topic='transcription',
@@ -108,6 +112,8 @@ class DeepgramConnector:
                         "timestamp": timestamp,
                         "speaker_name": speaker_name,
                         "speaker_number": speaker_number,
+                        "speaker_counterpart_name": speaker_counterpart_name,
+                        "speaker_counterpart_number": speaker_counterpart_number,
                         "is_final": result.is_final,
                     })
                 )
@@ -119,6 +125,8 @@ class DeepgramConnector:
                     "timestamp": timestamp,
                     "speaker_name": speaker_name,
                     "speaker_number": speaker_number,
+                    "speaker_counterpart_name": speaker_counterpart_name,
+                    "speaker_counterpart_number": speaker_counterpart_number,
                     "is_final": result.is_final,
                 })
         except Exception as e:
@@ -244,9 +252,15 @@ class DeepgramConnector:
                 "raw_transcription": text
             })
         )
+        # Process AI summary in background without blocking
+        asyncio.create_task(self._process_ai_summary(text))
+
+    async def _process_ai_summary(self, text):
+        """Process AI summary and cleaning in background thread"""
         try:
             from ai import get_summary, get_clean
-            clean_text = get_clean(text)
+            # Run synchronous AI calls in a thread to avoid blocking the event loop
+            clean_text = await asyncio.to_thread(get_clean, text)
             await self.mqtt_client.publish(
                 topic='final',
                 payload=json.dumps({
@@ -254,7 +268,7 @@ class DeepgramConnector:
                     "clean_transcription": clean_text
                 })
             )
-            summary = get_summary(text)
+            summary = await asyncio.to_thread(get_summary, text)
             await self.mqtt_client.publish(
                 topic='final',
                 payload=json.dumps({
