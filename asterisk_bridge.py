@@ -169,14 +169,12 @@ class AsteriskBridge:
                     original_channel_id = id
                     break
             direction = 'in' if 'snoop-in' in snoop_channel_id else 'out'
-            # Use 127.0.0.1 instead of 0.0.0.0 for external_host so Asterisk sends RTP to the correct address
-            rtp_host = "127.0.0.1" if self.rtp_server.host == "0.0.0.0" else self.rtp_server.host
             ext_media_response = await self._ari_request(
                 'POST',
                 f"/channels/externalMedia",
                 params={
                 'app': self.app,
-                'external_host': f"{rtp_host}:{self.rtp_server.port}",
+                'external_host': f"{self.rtp_server.host}:{self.rtp_server.port}",
                 'format': 'slin16',
                 'channelId': f'ext-media-{direction}-{original_channel_id}',
                 }
@@ -222,10 +220,6 @@ class AsteriskBridge:
 
             # if both bridge are created, start the deepgram connector
             if 'bridge_in' in self.channels[original_channel_id] and 'bridge_out' in self.channels[original_channel_id]:
-                speaker_name_in = self.channels[original_channel_id]['caller_name']
-                speaker_number_in = self.channels[original_channel_id]['caller_number']
-                speaker_name_out = self.channels[original_channel_id]['connected_name']
-                speaker_number_out = self.channels[original_channel_id]['connected_number']
                 try:
                     # get external media channel port and create a stream
                     rtp_stream_in = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port_in'])
@@ -234,26 +228,19 @@ class AsteriskBridge:
                     # Wait a moment for RTP association to happen
                     await asyncio.sleep(0.1)
 
+                    # Assign speaker names from channel info
+                    speaker_name_in = self.channels[original_channel_id]['caller_name']
+                    speaker_number_in = self.channels[original_channel_id]['caller_number']
+                    speaker_name_out = self.channels[original_channel_id]['connected_name']
+                    speaker_number_out = self.channels[original_channel_id]['connected_number']
+
                     # Check if Asterisk swapped the RTP ports by looking at the remote_addr
-                    # If stream_in receives from port_in, ports are NOT swapped
-                    # If stream_in receives from port_out, ports ARE swapped
-                    ports_are_swapped = False
+                    # If stream_in receives from port_out, ports ARE swapped -> swap speaker names
                     if rtp_stream_in.remote_addr:
                         source_port = rtp_stream_in.remote_addr[1]
                         if source_port == int(self.channels[original_channel_id]['rtp_source_port_out']):
-                            ports_are_swapped = True
-
-                    # If ports are swapped, we need to swap the speaker names too
-                    if ports_are_swapped:
-                        final_speaker_name_in = speaker_name_out
-                        final_speaker_number_in = speaker_number_out
-                        final_speaker_name_out = speaker_name_in
-                        final_speaker_number_out = speaker_number_in
-                    else:
-                        final_speaker_name_in = speaker_name_in
-                        final_speaker_number_in = speaker_number_in
-                        final_speaker_name_out = speaker_name_out
-                        final_speaker_number_out = speaker_number_out
+                            speaker_name_in, speaker_name_out = speaker_name_out, speaker_name_in
+                            speaker_number_in, speaker_number_out = speaker_number_out, speaker_number_in
 
                     # create a deepgram connector instance
                     self.channels[original_channel_id]['connector'] = DeepgramConnector(
@@ -263,10 +250,10 @@ class AsteriskBridge:
                         mqtt_client=self.mqtt_client,
                         uniqueid=original_channel_id,
                         language=self.channels[original_channel_id]['language'],
-                        speaker_name_in=final_speaker_name_in,
-                        speaker_number_in=final_speaker_number_in,
-                        speaker_name_out=final_speaker_name_out,
-                        speaker_number_out=final_speaker_number_out
+                        speaker_name_in=speaker_name_in,
+                        speaker_number_in=speaker_number_in,
+                        speaker_name_out=speaker_name_out,
+                        speaker_number_out=speaker_number_out
                     )
                     # start the deepgram connector in background to avoid blocking event loop
                     asyncio.create_task(self._start_connector(original_channel_id))
