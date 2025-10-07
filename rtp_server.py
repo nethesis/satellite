@@ -86,7 +86,6 @@ class RTPServer:
 
     async def stop(self):
         """Stop the RTP server"""
-        logger.debug(f"ENTER: stop() for RTP server on {self.host}:{self.port}")
         if self.transport:
             self.transport.close()
 
@@ -204,4 +203,3 @@ class RTPProtocol(asyncio.DatagramProtocol):
 
         # Feed audio data to the stream reader
         target_stream.reader.feed_data(audio_data)
-        #logger.debug(f"Received RTP packet from {addr}, size: {len(data)}")
