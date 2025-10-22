@@ -12,3 +12,4 @@ pydantic
 python-multipart
 uvicorn
 websockets>=11.0.3
+zstandard
