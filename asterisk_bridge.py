@@ -220,14 +220,28 @@ class AsteriskBridge:
 
             # if both bridge are created, start the deepgram connector
             if 'bridge_in' in self.channels[original_channel_id] and 'bridge_out' in self.channels[original_channel_id]:
-                speaker_name_in = self.channels[original_channel_id]['caller_name']
-                speaker_number_in = self.channels[original_channel_id]['caller_number']
-                speaker_name_out = self.channels[original_channel_id]['connected_name']
-                speaker_number_out = self.channels[original_channel_id]['connected_number']
                 try:
                     # get external media channel port and create a stream
                     rtp_stream_in = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port_in'])
                     rtp_stream_out = await self.rtp_server.create_stream(self.channels[original_channel_id]['rtp_source_port_out'])
+
+                    # Wait a moment for RTP association to happen
+                    await asyncio.sleep(0.1)
+
+                    # Assign speaker names from channel info
+                    speaker_name_in = self.channels[original_channel_id]['caller_name']
+                    speaker_number_in = self.channels[original_channel_id]['caller_number']
+                    speaker_name_out = self.channels[original_channel_id]['connected_name']
+                    speaker_number_out = self.channels[original_channel_id]['connected_number']
+
+                    # Check if Asterisk swapped the RTP ports by looking at the remote_addr
+                    # If stream_in receives from port_out, ports ARE swapped -> swap speaker names
+                    if rtp_stream_in.remote_addr:
+                        source_port = rtp_stream_in.remote_addr[1]
+                        if source_port == int(self.channels[original_channel_id]['rtp_source_port_out']):
+                            speaker_name_in, speaker_name_out = speaker_name_out, speaker_name_in
+                            speaker_number_in, speaker_number_out = speaker_number_out, speaker_number_in
+
                     # create a deepgram connector instance
                     self.channels[original_channel_id]['connector'] = DeepgramConnector(
                         deepgram_api_key=os.getenv("DEEPGRAM_API_KEY"),
@@ -241,8 +255,8 @@ class AsteriskBridge:
                         speaker_name_out=speaker_name_out,
                         speaker_number_out=speaker_number_out
                     )
-                    # start the deepgram connector
-                    await self.channels[original_channel_id]['connector'].start()
+                    # start the deepgram connector in background to avoid blocking event loop
+                    asyncio.create_task(self._start_connector(original_channel_id))
                 except Exception as e:
                     logger.error(f"Failed to start connector for channel {original_channel_id}: {e}")
                     self.close_channel(original_channel_id)
@@ -253,6 +267,18 @@ class AsteriskBridge:
                     params={}
                 )
                 logger.info(f"Channel {original_channel_id} returned to dialplan")
+
+    async def _start_connector(self, channel_id):
+        """Start the Deepgram connector in background"""
+        try:
+            if channel_id in self.channels and 'connector' in self.channels[channel_id]:
+                await self.channels[channel_id]['connector'].start()
+                logger.info(f"Deepgram connector started for channel {channel_id}")
+        except Exception as e:
+            logger.error(f"Failed to start Deepgram connector for channel {channel_id}: {e}")
+            # Close the channel if connector fails to start
+            if channel_id in self.channels:
+                await self.close_channel(channel_id)
 
     async def _handle_stasis_end(self, event):
         """Handle channel hangup event"""
