@@ -22,7 +22,7 @@ jobs:
     name: Scan repository
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Run vulnerability scanner
         if: ${{ env.is_release == 'true' || env.is_main == 'true' }}
         uses: aquasecurity/trivy-action@0.28.0
