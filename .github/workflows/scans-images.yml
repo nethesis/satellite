@@ -65,7 +65,7 @@ jobs:
     steps:
       - name: Run vulnerability scanner
         if: ${{ needs.build_info.outputs.is_main == 'true' || needs.build_info.outputs.is_release == 'true' }}
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: ${{ matrix.image }}
           severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
@@ -79,14 +79,14 @@ jobs:
           sarif_file: 'trivy-results.sarif'
       - name: Update GitHub Dependency Graph
         if: ${{ needs.build_info.outputs.is_main == 'true' || needs.build_info.outputs.is_release == 'true' }}
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: ${{ matrix.image }}
           format: github
           output: sbom.github.json
           github-pat: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate CycloneDX SBOM
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: ${{ matrix.image }}
           format: cyclonedx
