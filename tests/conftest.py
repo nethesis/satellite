@@ -3,7 +3,7 @@ Shared test fixtures and configuration for pytest.
 """
 import pytest
 import asyncio
-from unittest.mock import Mock, AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from io import BytesIO
 
 
