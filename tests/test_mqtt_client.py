@@ -4,7 +4,7 @@ Unit tests for the MQTT client and message validator.
 import pytest
 import asyncio
 import json
-from unittest.mock import Mock, AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 from mqtt_client import MQTTClient, MessageValidator
 
 
