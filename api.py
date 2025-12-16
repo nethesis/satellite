@@ -87,26 +87,6 @@ async def get_transcription(
         elif v.strip():
             params[k] = v
 
-    # Debug: log outgoing request details (with masked Authorization)
-    try:
-        auth_value = headers.get("Authorization")
-        if isinstance(auth_value, str) and auth_value.startswith("Token ") and len(auth_value) > 10:
-            masked_auth = f"Token ****{auth_value[-4:]}"
-        else:
-            masked_auth = "***"
-        safe_headers = {**headers, "Authorization": masked_auth}
-        logger.debug(
-            "Deepgram request: url=%s headers=%s params=%s content_length=%s content_type=%s",
-            "https://api.deepgram.com/v1/listen",
-            {k: safe_headers[k] for k in safe_headers},
-            params,
-            len(audio_bytes),
-            file.content_type,
-        )
-    except Exception:
-        # Never block the request on logging
-        logger.debug("Failed to prepare debug log for Deepgram request")
-
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
