@@ -25,7 +25,7 @@ jobs:
       base_path: ${{ steps.registry.outputs.base_path }}
       image_tag: ${{ steps.registry.outputs.image_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check if the branch is main
         id: check_branch
         run: |
@@ -65,7 +65,7 @@ jobs:
     steps:
       - name: Run vulnerability scanner
         if: ${{ needs.build_info.outputs.is_main == 'true' || needs.build_info.outputs.is_release == 'true' }}
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: ${{ matrix.image }}
           severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
@@ -74,19 +74,19 @@ jobs:
           limit-severities-for-sarif: true
       - name: Upload scan results to GitHub Security tab
         if: ${{ needs.build_info.outputs.is_main == 'true' || needs.build_info.outputs.is_release == 'true' }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
       - name: Update GitHub Dependency Graph
         if: ${{ needs.build_info.outputs.is_main == 'true' || needs.build_info.outputs.is_release == 'true' }}
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: ${{ matrix.image }}
           format: github
           output: sbom.github.json
           github-pat: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate CycloneDX SBOM
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: ${{ matrix.image }}
           format: cyclonedx
@@ -97,7 +97,7 @@ jobs:
           SAFE_NAME=$(echo "${{ matrix.image }}" | sed 's/[^a-zA-Z0-9]/-/g')
           echo "safe_name=${SAFE_NAME}" >> $GITHUB_OUTPUT
       - name: Upload CycloneDX SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ steps.safe-filename.outputs.safe_name }}-cyclonedx-sbom
           path: sbom-${{ github.run_id }}-${{ github.run_attempt }}.cdx.json
