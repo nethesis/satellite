@@ -74,7 +74,7 @@ jobs:
           limit-severities-for-sarif: true
       - name: Upload scan results to GitHub Security tab
         if: ${{ needs.build_info.outputs.is_main == 'true' || needs.build_info.outputs.is_release == 'true' }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
       - name: Update GitHub Dependency Graph
