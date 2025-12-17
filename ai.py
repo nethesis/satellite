@@ -1,5 +1,5 @@
 from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate, PromptTemplate, HumanMessagePromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
 def get_summary(text):
@@ -8,7 +8,7 @@ def get_summary(text):
     """
     llm = ChatOpenAI(temperature=0.3, model="gpt-5-mini")
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """"
+        ("system", """
 The provided text is a transcription of a conversation.
 Your task is to summarize the conversation in a concise manner.
 Make sure to include the main points and any important details.
@@ -26,7 +26,7 @@ Write the Output in the same language as the Input text provided.
 # Output:
 """        )
     ])
-    chain = ({"text": RunnablePassthrough()} | prompt | llm)
+    chain = prompt | llm
     return chain.invoke({"text": text}).content
 
 def get_clean(text):
@@ -35,7 +35,7 @@ def get_clean(text):
     """
     llm = ChatOpenAI(temperature=0.3, model="gpt-5-mini")
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """"
+        ("system", """
 The provided text is a transcription of a conversation.
 Your task is to clean it up fixing indentation, punctuation and misspelled words.
 Make sure to include the speaker names and their respective statements.
@@ -49,5 +49,5 @@ Write the Output in the same language as the Input text provided.
 # Output:
 """        )
     ])
-    chain = ({"text": RunnablePassthrough()} | prompt | llm)
+    chain = prompt | llm
     return chain.invoke({"text": text}).content
