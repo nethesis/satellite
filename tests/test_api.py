@@ -38,6 +38,16 @@ def valid_wav_content():
 class TestGetTranscription:
     """Tests for the /api/get_transcription endpoint."""
 
+    def test_missing_uniqueid(self, client, valid_wav_content):
+        """Test that missing uniqueid form field is rejected."""
+        response = client.post(
+            "/api/get_transcription",
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+        )
+
+        assert response.status_code == 400
+        assert "uniqueid" in response.json()["detail"]
+
     @patch('httpx.AsyncClient')
     def test_valid_wav_file(self, mock_client_class, client, valid_wav_content):
         """Test transcription with a valid WAV file."""
@@ -66,7 +76,8 @@ class TestGetTranscription:
         # Make the request
         response = client.post(
             "/api/get_transcription",
-            files={"file": ("test.wav", valid_wav_content, "audio/wav")}
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
         )
 
         # Assertions
@@ -109,7 +120,8 @@ class TestGetTranscription:
 
         response = client.post(
             "/api/get_transcription",
-            files={"file": ("test.wav", valid_wav_content, "audio/wav")}
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
         )
 
         assert response.status_code == 401
@@ -131,7 +143,8 @@ class TestGetTranscription:
 
         response = client.post(
             "/api/get_transcription",
-            files={"file": ("test.wav", valid_wav_content, "audio/wav")}
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
         )
 
         assert response.status_code == 500
@@ -163,7 +176,8 @@ class TestGetTranscription:
 
         response = client.post(
             "/api/get_transcription",
-            files={"file": ("test.wav", valid_wav_content, "audio/wav")}
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
         )
 
         assert response.status_code == 200

@@ -2,6 +2,10 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 import httpx
 import os
 import logging
+import anyio
+
+import ai
+import db
 
 app = FastAPI()
 logger = logging.getLogger("api")
@@ -34,6 +38,12 @@ async def get_transcription(
     input_params = {**dict(request.query_params), **form_params}
 
     logger.debug(f"Params: {input_params}")
+
+    uniqueid = (input_params.get("uniqueid") or "").strip()
+    try:
+        db.validate_uniqueid(uniqueid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Valid Deepgram REST API parameters for /v1/listen endpoint
     deepgram_params = {
@@ -132,5 +142,41 @@ async def get_transcription(
             diarized_transcript = None
     except (KeyError, IndexError):
         raise HTTPException(status_code=500, detail="Failed to parse transcription response.")
+
+    # Persist raw transcript always (when Postgres config is present)
+    transcript_id = None
+    if db.is_configured():
+        try:
+            transcript_id = await anyio.to_thread.run_sync(
+                db.upsert_transcript_raw,
+                uniqueid=uniqueid,
+                raw_transcription=transcript,
+                detected_language=detected_language,
+                diarized_transcript=diarized_transcript,
+            )
+        except Exception:
+            logger.exception("Failed to persist raw transcript to Postgres")
+            raise HTTPException(status_code=500, detail="Failed to persist transcription")
+    else:
+        logger.warning("PGVECTOR_* env vars not set; skipping Postgres persistence")
+
+    # Optional AI enrichment + embeddings
+    if os.getenv("OPENAI_API_KEY") and transcript_id is not None and transcript.strip():
+        try:
+            cleaned = await anyio.to_thread.run_sync(ai.get_clean, transcript)
+            summary = await anyio.to_thread.run_sync(ai.get_summary, cleaned)
+            await anyio.to_thread.run_sync(
+                db.update_transcript_ai_fields,
+                transcript_id=transcript_id,
+                cleaned_transcription=cleaned,
+                summary=summary,
+            )
+            await anyio.to_thread.run_sync(
+                db.replace_transcript_embeddings,
+                transcript_id=transcript_id,
+                raw_transcription=transcript,
+            )
+        except Exception:
+            logger.exception("Failed to generate/store AI fields or embeddings")
 
     return {"transcript": transcript, "detected_language": detected_language, "diarized_transcript": diarized_transcript}
