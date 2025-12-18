@@ -189,10 +189,18 @@ def _split_text_for_embedding(text: str) -> List[str]:
     return [c for c in chunks if c]
 
 
-def replace_transcript_embeddings(*, transcript_id: int, raw_transcription: str) -> int:
+def replace_transcript_embeddings(
+    *,
+    transcript_id: int,
+    raw_transcription: str,
+    uniqueid: Optional[str] = None,
+) -> int:
     """Replace all chunk embeddings for transcript_id. Returns number of chunks stored."""
 
     _ensure_schema()
+
+    if uniqueid is not None:
+        validate_uniqueid(uniqueid)
 
     chunks = _split_text_for_embedding(raw_transcription)
     if not chunks:

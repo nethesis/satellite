@@ -88,6 +88,52 @@ class TestGetTranscription:
         assert "detected_language" in data
         assert data["detected_language"] == "en"
 
+    @patch('httpx.AsyncClient')
+    def test_persists_raw_transcript_via_threadpool(self, mock_client_class, client, valid_wav_content):
+        """Ensure persistence path uses threadpool helper and forwards kwargs to db layer."""
+
+        # Mock the Deepgram API response
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "results": {
+                "channels": [
+                    {
+                        "alternatives": [
+                            {"transcript": "Hello world"}
+                        ],
+                        "detected_language": "en",
+                    }
+                ]
+            }
+        }
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        async def fake_run_in_threadpool(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("api.db.is_configured", return_value=True), \
+             patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
+             patch("api.run_in_threadpool", new=fake_run_in_threadpool):
+            response = client.post(
+                "/api/get_transcription",
+                files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+                data={"uniqueid": "1234567890.1234"},
+            )
+
+        assert response.status_code == 200
+        upsert_mock.assert_called_once_with(
+            uniqueid="1234567890.1234",
+            raw_transcription="Hello world",
+            detected_language="en",
+            diarized_transcript=None,
+        )
+
     def test_invalid_file_type(self, client):
         """Test that non-WAV files are rejected."""
         response = client.post(

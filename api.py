@@ -1,8 +1,11 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+try:
+    from fastapi.concurrency import run_in_threadpool
+except Exception:  # pragma: no cover
+    from starlette.concurrency import run_in_threadpool
 import httpx
 import os
 import logging
-import anyio
 
 import ai
 import db
@@ -103,7 +106,8 @@ async def get_transcription(
                 "https://api.deepgram.com/v1/listen",
                 headers=headers,
                 params=params,
-                content=audio_bytes
+                content=audio_bytes,
+                timeout=300.0,
             )
             # Debug: log response meta and preview
             try:
@@ -147,7 +151,7 @@ async def get_transcription(
     transcript_id = None
     if db.is_configured():
         try:
-            transcript_id = await anyio.to_thread.run_sync(
+            transcript_id = await run_in_threadpool(
                 db.upsert_transcript_raw,
                 uniqueid=uniqueid,
                 raw_transcription=transcript,
@@ -163,17 +167,18 @@ async def get_transcription(
     # Optional AI enrichment + embeddings
     if os.getenv("OPENAI_API_KEY") and transcript_id is not None and transcript.strip():
         try:
-            cleaned = await anyio.to_thread.run_sync(ai.get_clean, transcript)
-            summary = await anyio.to_thread.run_sync(ai.get_summary, cleaned)
-            await anyio.to_thread.run_sync(
+            cleaned = await run_in_threadpool(ai.get_clean, transcript)
+            summary = await run_in_threadpool(ai.get_summary, cleaned)
+            await run_in_threadpool(
                 db.update_transcript_ai_fields,
                 transcript_id=transcript_id,
                 cleaned_transcription=cleaned,
                 summary=summary,
             )
-            await anyio.to_thread.run_sync(
+            await run_in_threadpool(
                 db.replace_transcript_embeddings,
                 transcript_id=transcript_id,
+                uniqueid=uniqueid,
                 raw_transcription=transcript,
             )
         except Exception:
