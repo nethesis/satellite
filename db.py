@@ -103,18 +103,17 @@ def _ensure_schema() -> None:
             )
 
             conn.execute(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS transcript_chunks (
                     id BIGSERIAL PRIMARY KEY,
                     transcript_id BIGINT NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE,
                     chunk_index INTEGER NOT NULL,
                     content TEXT NOT NULL,
-                    embedding vector(%s) NOT NULL,
+                    embedding vector({_EMBEDDING_DIM}) NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE (transcript_id, chunk_index)
                 )
-                """,
-                (_EMBEDDING_DIM,),
+                """
             )
 
             conn.execute(
