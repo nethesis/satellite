@@ -53,8 +53,23 @@ def _conninfo() -> str:
 
 def _connect() -> psycopg.Connection:
     conn = psycopg.connect(_conninfo())
-    register_vector(conn)
+    try:
+        register_vector(conn)
+    except psycopg.ProgrammingError as e:
+        # When the database doesn't have pgvector installed yet, pgvector's
+        # registration fails with "vector type not found in the database".
+        # We install the extension and retry once.
+        if "vector type not found" not in str(e):
+            conn.close()
+            raise
+        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        conn.commit()
+        register_vector(conn)
     return conn
+
+
+def _connect_without_pgvector() -> psycopg.Connection:
+    return psycopg.connect(_conninfo())
 
 
 def _ensure_schema() -> None:
@@ -66,7 +81,9 @@ def _ensure_schema() -> None:
         if _schema_initialized:
             return
 
-        with _connect() as conn:
+        # Don't attempt pgvector type registration during bootstrap.
+        # We may need to install the extension first.
+        with _connect_without_pgvector() as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
             conn.execute(
