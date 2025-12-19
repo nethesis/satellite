@@ -100,7 +100,7 @@ async def get_transcription(
         "redact" : "",
         "replace" : "",
         "search" : "",
-        "sentiment" : "true",
+        "sentiment" : "false",
         "smart_format" : "",
         "summarize" : "",
         "tag" : "",
