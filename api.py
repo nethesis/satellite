@@ -65,6 +65,9 @@ async def get_transcription(
     logger.debug(f"Params: {input_params}")
 
     uniqueid = (input_params.get("uniqueid") or "").strip()
+    channel0_name = (input_params.get("channel0_name") or "").strip()
+    channel1_name = (input_params.get("channel1_name") or "").strip()
+
     try:
         db.validate_uniqueid(uniqueid)
     except ValueError as e:
@@ -169,6 +172,10 @@ async def get_transcription(
     result = response.json()
     try:
         raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
+        if channel0_name:
+            raw_transcription = raw_transcription.replace("Channel 0:", f"{channel0_name}:")
+        if channel1_name:
+            raw_transcription = raw_transcription.replace("Channel 1:", f"{channel1_name}:")
     except (KeyError, IndexError):
         raise HTTPException(status_code=500, detail="Failed to parse transcription response.")
 
