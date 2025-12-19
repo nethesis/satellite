@@ -151,8 +151,6 @@ async def test_upsert_transcript_raw_returns_id(monkeypatch: pytest.MonkeyPatch)
         db.upsert_transcript_raw,
         uniqueid="1234567890.1234",
         raw_transcription="hello",
-        detected_language="en",
-        diarized_transcript=None,
     )
 
     assert transcript_id == 42
@@ -185,6 +183,7 @@ async def test_update_transcript_ai_fields_executes_update(monkeypatch: pytest.M
         transcript_id=10,
         cleaned_transcription="clean",
         summary="sum",
+        sentiment=None,
     )
 
     # Ensure UPDATE statement was issued

@@ -95,8 +95,8 @@ PGVECTOR_DATABASE=satellite
 If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` will persist the raw transcription to Postgres.
 
 The database schema is created automatically on first use and includes:
-- `transcripts`: stores `uniqueid`, raw transcription, optional cleaned transcription and summary
-- `transcript_chunks`: stores chunked `text-embedding-3-small` embeddings in a `vector(1536)` column for similarity search
+- `transcripts`: stores `uniqueid`, diarized raw transcription (Deepgram paragraphs transcript), optional cleaned transcription + summary, and `sentiment` (0-10)
+- `transcript_chunks`: table for storing chunked `text-embedding-3-small` embeddings in a `vector(1536)` column for similarity search
 
 This requires the `vector` extension (pgvector) in your Postgres instance.
 
@@ -121,8 +121,8 @@ curl -X POST http://127.0.0.1:8000/api/get_transcription \
 ```
 
 If `PGVECTOR_*` is configured, the raw transcription is saved to Postgres.
-If `OPENAI_API_KEY` is set, the service also generates a cleaned transcription + summary and stores chunked OpenAI embeddings.
-If `OPENAI_API_KEY` is missing, clean/summary/embeddings are skipped.
+If `OPENAI_API_KEY` is set, the service also generates a cleaned transcription, summary, and sentiment score (0-10) via a per-request subprocess worker (`call_processor.py`) and stores them in Postgres.
+If `OPENAI_API_KEY` is missing, clean/summary/sentiment are skipped.
 
 ## Architecture
 

@@ -1,11 +1,11 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
-try:
-    from fastapi.concurrency import run_in_threadpool
-except Exception:  # pragma: no cover
-    from starlette.concurrency import run_in_threadpool
+from fastapi.concurrency import run_in_threadpool
+import json
 import httpx
 import os
 import logging
+import subprocess
+import sys
 
 import ai
 import db
@@ -14,6 +14,20 @@ app = FastAPI()
 logger = logging.getLogger("api")
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")  # Ensure this environment variable is set
+
+def _run_call_processor(*, transcript_id: int, raw_transcription: str) -> None:
+    payload = {"transcript_id": transcript_id, "raw_transcription": raw_transcription}
+    proc = subprocess.run(
+        [sys.executable, os.path.join(os.path.dirname(__file__), "call_processor.py")],
+        input=json.dumps(payload).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=float(os.getenv("CALL_PROCESSOR_TIMEOUT_SECONDS", "600")),
+    )
+    if proc.returncode != 0:
+        stderr_preview = (proc.stderr or b"")[:2000].decode("utf-8", errors="replace")
+        stdout_preview = (proc.stdout or b"")[:2000].decode("utf-8", errors="replace")
+        raise RuntimeError(f"call_processor failed rc={proc.returncode} stdout={stdout_preview!r} stderr={stderr_preview!r}")
 
 def _get_deepgram_timeout_seconds() -> float:
     raw = os.getenv("DEEPGRAM_TIMEOUT_SECONDS", "300").strip()
@@ -153,18 +167,8 @@ async def get_transcription(
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
     result = response.json()
-    logger.debug(f"Deepgram result JSON: {result}")
     try:
-        transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
-        if "detected_language" in result["results"]["channels"][0]:
-            detected_language = result["results"]["channels"][0]["detected_language"]
-        else:
-            detected_language = None
-        # get speaker diarization
-        if "paragraphs" in result["results"] and 'transcript' in result["results"]["paragraphs"]:
-            diarized_transcript = result["results"]["paragraphs"]["transcript"]
-        else:
-            diarized_transcript = None
+        raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
     except (KeyError, IndexError):
         raise HTTPException(status_code=500, detail="Failed to parse transcription response.")
 
@@ -175,9 +179,7 @@ async def get_transcription(
             transcript_id = await run_in_threadpool(
                 db.upsert_transcript_raw,
                 uniqueid=uniqueid,
-                raw_transcription=transcript,
-                detected_language=detected_language,
-                diarized_transcript=diarized_transcript,
+                raw_transcription=raw_transcription,
             )
         except Exception:
             logger.exception("Failed to persist raw transcript to Postgres")
@@ -185,24 +187,15 @@ async def get_transcription(
     else:
         logger.warning("PGVECTOR_* env vars not set; skipping Postgres persistence")
 
-    # Optional AI enrichment + embeddings
-    if os.getenv("OPENAI_API_KEY") and transcript_id is not None and transcript.strip():
+    # Optional AI enrichment (clean/summary/sentiment) via per-request subprocess
+    if os.getenv("OPENAI_API_KEY") and transcript_id is not None and raw_transcription:
         try:
-            cleaned = await run_in_threadpool(ai.get_clean, transcript)
-            summary = await run_in_threadpool(ai.get_summary, cleaned)
             await run_in_threadpool(
-                db.update_transcript_ai_fields,
+                _run_call_processor,
                 transcript_id=transcript_id,
-                cleaned_transcription=cleaned,
-                summary=summary,
-            )
-            await run_in_threadpool(
-                db.replace_transcript_embeddings,
-                transcript_id=transcript_id,
-                uniqueid=uniqueid,
-                raw_transcription=transcript,
+                raw_transcription=raw_transcription,
             )
         except Exception:
-            logger.exception("Failed to generate/store AI fields or embeddings")
+            logger.exception("Failed to process call transcript")
 
-    return {"transcript": transcript, "detected_language": detected_language, "diarized_transcript": diarized_transcript}
+    return {"transcript": raw_transcription}

@@ -12,14 +12,14 @@ def mock_deepgram_response():
     """Mock response from Deepgram API."""
     return {
         "results": {
+            "paragraphs": {"transcript": "SPEAKER 1: This is a test transcription"},
             "channels": [
                 {
                     "alternatives": [
                         {
                             "transcript": "This is a test transcription"
                         }
-                    ],
-                    "detected_language": "en"
+                    ]
                 }
             ]
         }

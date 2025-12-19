@@ -7,10 +7,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import psycopg
 from pgvector.psycopg import register_vector
 
-try:
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-except Exception:  # pragma: no cover
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from langchain_openai import OpenAIEmbeddings
 
@@ -94,8 +91,7 @@ def _ensure_schema() -> None:
                     raw_transcription TEXT NOT NULL,
                     cleaned_transcription TEXT,
                     summary TEXT,
-                    detected_language TEXT,
-                    diarized_transcript TEXT,
+                    sentiment SMALLINT CHECK (sentiment BETWEEN 0 AND 10),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
@@ -150,8 +146,6 @@ def upsert_transcript_raw(
     *,
     uniqueid: str,
     raw_transcription: str,
-    detected_language: Optional[str] = None,
-    diarized_transcript: Optional[str] = None,
 ) -> int:
     """Insert or update the raw transcript row and return its transcript id."""
 
@@ -161,17 +155,15 @@ def upsert_transcript_raw(
     with _connect() as conn:
         row = conn.execute(
             """
-            INSERT INTO transcripts (uniqueid, raw_transcription, detected_language, diarized_transcript)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO transcripts (uniqueid, raw_transcription)
+            VALUES (%s, %s)
             ON CONFLICT (uniqueid)
             DO UPDATE SET
                 raw_transcription = EXCLUDED.raw_transcription,
-                detected_language = EXCLUDED.detected_language,
-                diarized_transcript = EXCLUDED.diarized_transcript,
                 updated_at = now()
             RETURNING id
             """,
-            (uniqueid, raw_transcription, detected_language, diarized_transcript),
+            (uniqueid, raw_transcription),
         ).fetchone()
 
         if row is None:
@@ -179,7 +171,13 @@ def upsert_transcript_raw(
         return int(row[0])
 
 
-def update_transcript_ai_fields(*, transcript_id: int, cleaned_transcription: str, summary: str) -> None:
+def update_transcript_ai_fields(
+    *,
+    transcript_id: int,
+    cleaned_transcription: str,
+    summary: str,
+    sentiment: Optional[int],
+) -> None:
     _ensure_schema()
 
     with _connect() as conn:
@@ -188,10 +186,11 @@ def update_transcript_ai_fields(*, transcript_id: int, cleaned_transcription: st
             UPDATE transcripts
             SET cleaned_transcription = %s,
                 summary = %s,
+                sentiment = %s,
                 updated_at = now()
             WHERE id = %s
             """,
-            (cleaned_transcription, summary, transcript_id),
+            (cleaned_transcription, summary, sentiment, transcript_id),
         )
 
 

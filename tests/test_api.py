@@ -55,12 +55,12 @@ class TestGetTranscription:
         mock_response = Mock()
         mock_response.json.return_value = {
             "results": {
+                "paragraphs": {"transcript": "SPEAKER 1: Hello world"},
                 "channels": [
                     {
                         "alternatives": [
                             {"transcript": "Hello world"}
-                        ],
-                        "detected_language": "en"
+                        ]
                     }
                 ]
             }
@@ -84,9 +84,7 @@ class TestGetTranscription:
         assert response.status_code == 200
         data = response.json()
         assert "transcript" in data
-        assert data["transcript"] == "Hello world"
-        assert "detected_language" in data
-        assert data["detected_language"] == "en"
+        assert data["transcript"] == "SPEAKER 1: Hello world"
 
     @patch('httpx.AsyncClient')
     def test_persists_raw_transcript_via_threadpool(self, mock_client_class, client, valid_wav_content):
@@ -96,12 +94,12 @@ class TestGetTranscription:
         mock_response = Mock()
         mock_response.json.return_value = {
             "results": {
+                "paragraphs": {"transcript": "SPEAKER 1: Hello world"},
                 "channels": [
                     {
                         "alternatives": [
                             {"transcript": "Hello world"}
-                        ],
-                        "detected_language": "en",
+                        ]
                     }
                 ]
             }
@@ -129,9 +127,7 @@ class TestGetTranscription:
         assert response.status_code == 200
         upsert_mock.assert_called_once_with(
             uniqueid="1234567890.1234",
-            raw_transcription="Hello world",
-            detected_language="en",
-            diarized_transcript=None,
+            raw_transcription="SPEAKER 1: Hello world",
         )
 
     def test_invalid_file_type(self, client):
@@ -217,9 +213,9 @@ class TestGetTranscription:
         assert "Failed to parse transcription response" in response.json()["detail"]
 
     @patch('httpx.AsyncClient')
-    def test_no_detected_language(self, mock_client_class, client, valid_wav_content):
-        """Test transcription response when language detection is not available."""
-        # Mock response without detected_language field
+    def test_missing_paragraphs_transcript_is_error(self, mock_client_class, client, valid_wav_content):
+        """Diarized-only: missing paragraphs transcript returns 500."""
+        # Mock response without paragraphs transcript
         mock_response = Mock()
         mock_response.json.return_value = {
             "results": {
@@ -246,8 +242,6 @@ class TestGetTranscription:
             data={"uniqueid": "1234567890.1234"},
         )
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["transcript"] == "Test transcript"
-        assert data["detected_language"] is None
+        assert response.status_code == 500
+        assert "Failed to parse transcription response" in response.json()["detail"]
 
