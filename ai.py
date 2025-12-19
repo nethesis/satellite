@@ -1,8 +1,14 @@
+import logging
+import time
+
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+
+logger = logging.getLogger("ai")
 
 def _split_big(text: str):
     splitter = RecursiveCharacterTextSplitter(
@@ -15,7 +21,10 @@ def _split_big(text: str):
 
 
 def _llm():
-    return ChatOpenAI(temperature=0.3, model="gpt-5-mini")
+    model = "gpt-5-mini"
+    temperature = 0.2
+    logger.debug("Creating ChatOpenAI client (model=%s, temperature=%s)", model, temperature)
+    return ChatOpenAI(temperature=temperature, model=model)
 
 
 def _clamp_sentiment(value: int) -> int:
@@ -32,9 +41,20 @@ def generate_clean_summary_sentiment(text: str):
     Splits very long transcripts into large chunks to stay within model context.
     """
 
+    started_at = time.monotonic()
+    input_len = len(text or "")
+    logger.info("AI pipeline start (input_len=%d)", input_len)
+
     chunks = _split_big(text)
     if not chunks:
+        logger.info("AI pipeline: empty input")
         return "", "", None
+
+    logger.debug(
+        "AI pipeline: split input into %d chunk(s) (chunk_lens=%s)",
+        len(chunks),
+        [len(c) for c in chunks],
+    )
 
     llm = _llm()
 
@@ -43,25 +63,76 @@ def generate_clean_summary_sentiment(text: str):
             (
                 "system",
                 """
-You are given a multi-speaker transcription where overlapping speech caused sentences to be split into single words across consecutive lines of the same speaker.
+You are given a multi-speaker transcription where overlapping speech caused sentences to be split into single words.
+Speaker labels are alternated line by line, even when the same speaker is continuing the same sentence.
 
 Task:
-- Reconstruct readable sentences by merging consecutive fragments spoken by the same channel.
+- Reconstruct readable sentences by merging fragments that logically belong together, even if interrupted by the other speaker.
 - Preserve the original wording as much as possible.
 - Do NOT paraphrase, summarize, translate, or add content.
 - Do NOT change speaker labels.
 - Keep the original language.
-- If a fragment clearly completes the previous utterance of the same channel, merge it.
-- If speakers alternate, do NOT merge across channels.
+- Merge fragments when they clearly form a single sentence.
 - Preserve punctuation when possible; add minimal punctuation only if required for readability.
 - Do NOT add explanations, comments, or preambles.
 - Output ONLY the cleaned transcription.
+
+### Example 1
+
+Input:
+Channel 0: Ciao
+Channel 1: Ciao
+Channel 0: come
+Channel 1: tutto bene?
+Channel 0: stai?
+Channel 1: Io assonnato
+Channel 0: Io
+Channel 1: ma felice
+Channel 0: sto bene, grazie
+
+Output:
+Channel 0: Ciao come stai?
+Channel 1: Ciao tutto bene?
+Channel 0: Io sto bene, grazie
+Channel 1: Io assonnato, ma felice
+
+### Example 2 (English)
+
+Input:
+Alice: I
+Bob: Yes?
+Alice: was
+Bob: go on
+Alice: saying
+Bob: okay
+Alice: that the system
+Bob: sounds good
+Alice: is ready
+
+Output:
+Alice: I was saying that the system is ready
+Bob: Yes? go on okay sounds good
+
+### Example 3
+
+Input:
+Mario Rossi: Non
+Maria Bianchi: Sì?
+Mario Rossi: ho
+Maria Bianchi: dimmi
+Mario Rossi: capito
+Maria Bianchi: pure
+Mario Rossi: niente
+
+Output:
+Mario Rossi: Non ho capito niente
+Maria Bianchi: Sì? dimmi pure
                 """.strip(),
             ),
             (
                 "human",
                 """
-# Input:
+# Input Transcription:
 {text}
 
 # Output:
@@ -72,9 +143,15 @@ Task:
     clean_chain = clean_prompt | llm
 
     cleaned_chunks = []
-    for chunk in chunks:
-        cleaned_chunks.append(clean_chain.invoke({"text": chunk}).content)
+    for idx, chunk in enumerate(chunks):
+        try:
+            logger.debug("AI pipeline: cleaning chunk %d/%d (len=%d)", idx + 1, len(chunks), len(chunk))
+            cleaned_chunks.append(clean_chain.invoke({"text": chunk}).content)
+        except Exception:
+            logger.exception("AI pipeline: failed cleaning chunk %d/%d", idx + 1, len(chunks))
+            raise
     cleaned = "\n\n".join([c.strip() for c in cleaned_chunks if c and c.strip()]).strip()
+    logger.debug("AI pipeline: cleaned_len=%d", len(cleaned))
 
     summarize_chunk_prompt = ChatPromptTemplate.from_messages(
         [
@@ -83,7 +160,6 @@ Task:
                 """
 The provided text is a transcription of a conversation.
 Summarize this chunk concisely.
-- Use bullet points.
 - Do NOT change speaker labels.
 - Capture main points and important details.
 - No opinions.
@@ -107,8 +183,15 @@ Summarize this chunk concisely.
     summarize_chunk_chain = summarize_chunk_prompt | llm
 
     chunk_summaries = []
-    for chunk in _split_big(cleaned):
-        chunk_summaries.append(summarize_chunk_chain.invoke({"text": chunk}).content)
+    summarize_chunks = _split_big(cleaned)
+    logger.debug("AI pipeline: summarizing %d cleaned chunk(s)", len(summarize_chunks))
+    for idx, chunk in enumerate(summarize_chunks):
+        try:
+            logger.debug("AI pipeline: summarizing chunk %d/%d (len=%d)", idx + 1, len(summarize_chunks), len(chunk))
+            chunk_summaries.append(summarize_chunk_chain.invoke({"text": chunk}).content)
+        except Exception:
+            logger.exception("AI pipeline: failed summarizing chunk %d/%d", idx + 1, len(summarize_chunks))
+            raise
 
     reduce_prompt = ChatPromptTemplate.from_messages(
         [
@@ -132,8 +215,13 @@ No preamble or conclusion.
         ]
     )
     reduce_chain = reduce_prompt | llm
-    summary = reduce_chain.invoke({"text": "\n\n".join([s.strip() for s in chunk_summaries if s and s.strip()])}).content
+    try:
+        summary = reduce_chain.invoke({"text": "\n\n".join([s.strip() for s in chunk_summaries if s and s.strip()])}).content
+    except Exception:
+        logger.exception("AI pipeline: failed reducing chunk summaries")
+        raise
     summary = (summary or "").strip()
+    logger.debug("AI pipeline: summary_len=%d", len(summary))
 
     sentiment_prompt = ChatPromptTemplate.from_messages(
         [
@@ -163,12 +251,25 @@ example output:3
     )
     sentiment_chain = sentiment_prompt | llm
 
-    sentiment_text = sentiment_chain.invoke({"text": cleaned[:20000]}).content
+    try:
+        sentiment_text = sentiment_chain.invoke({"text": cleaned[:20000]}).content
+    except Exception:
+        logger.exception("AI pipeline: failed sentiment scoring")
+        raise
     sentiment = None
     if sentiment_text is not None:
         try:
             sentiment = _clamp_sentiment(int(sentiment_text.strip()))
         except Exception:
             sentiment = None
+
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    logger.info(
+        "AI pipeline done (cleaned_len=%d summary_len=%d sentiment=%s elapsed_ms=%d)",
+        len(cleaned),
+        len(summary),
+        sentiment,
+        elapsed_ms,
+    )
 
     return cleaned, summary, sentiment
