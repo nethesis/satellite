@@ -174,6 +174,26 @@ class TestGetTranscription:
         assert "Deepgram API error" in response.json()["detail"]
 
     @patch('httpx.AsyncClient')
+    def test_deepgram_timeout_returns_504(self, mock_client_class, client, valid_wav_content):
+        """Test that Deepgram timeouts are mapped to 504 Gateway Timeout."""
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=httpx.ReadTimeout("Timed out", request=Mock())
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        response = client.post(
+            "/api/get_transcription",
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
+        )
+
+        assert response.status_code == 504
+        assert "timed out" in response.json()["detail"].lower()
+
+    @patch('httpx.AsyncClient')
     def test_malformed_deepgram_response(self, mock_client_class, client, valid_wav_content):
         """Test handling of malformed responses from Deepgram."""
         # Mock a response with missing fields
