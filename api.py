@@ -153,6 +153,7 @@ async def get_transcription(
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
     result = response.json()
+    logger.debug(f"Deepgram result JSON: {result}")
     try:
         transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
         if "detected_language" in result["results"]["channels"][0]:
