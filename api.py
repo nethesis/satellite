@@ -19,9 +19,9 @@ def _run_call_processor(
     *,
     transcript_id: int,
     raw_transcription: str,
-    summarize: bool = False,
+    summary: bool = False,
 ) -> None:
-    payload = {"transcript_id": transcript_id, "raw_transcription": raw_transcription, "summarize": summarize}
+    payload = {"transcript_id": transcript_id, "raw_transcription": raw_transcription, "summary": summary}
     proc = subprocess.run(
         [sys.executable, os.path.join(os.path.dirname(__file__), "call_processor.py")],
         input=json.dumps(payload).encode("utf-8"),
@@ -74,7 +74,7 @@ async def get_transcription(
     channel1_name = (input_params.get("channel1_name") or "").strip()
     # Persist only when explicitly requested.
     persist = (input_params.get("persist") or "false").lower() in ("1", "true", "yes")
-    summarize = (input_params.get("summarize") or "false").lower() in ("1", "true", "yes")
+    summary = (input_params.get("summary") or "false").lower() in ("1", "true", "yes")
 
     # uniqueid is only required when persistence is enabled.
     if persist:
@@ -181,13 +181,19 @@ async def get_transcription(
 
     result = response.json()
     try:
-        raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
-        detected_language = result["results"].get("detected_language", None)
+        if "multichannel" in params and params["multichannel"] == "true":
+            raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
+            detected_language = result["results"].get("detected_language", None)
+        else:
+            raw_transcription = result["results"]["channels"][0]["alternatives"][0]["paragraphs"]["transcript"].strip()
+            detected_language = result["results"]["channels"][0].get("detected_language", None)
+
         if channel0_name:
             raw_transcription = raw_transcription.replace("Channel 0:", f"{channel0_name}:")
         if channel1_name:
             raw_transcription = raw_transcription.replace("Channel 1:", f"{channel1_name}:")
     except (KeyError, IndexError):
+        logger.error("Failed to parse Deepgram transcription response: %s", response.text)
         raise HTTPException(status_code=500, detail="Failed to parse transcription response.")
 
     # Persist raw transcript when Postgres config is present (default) unless disabled per request.
@@ -218,7 +224,7 @@ async def get_transcription(
                 _run_call_processor,
                 transcript_id=transcript_id,
                 raw_transcription=raw_transcription,
-                summarize=summarize,
+                summary=summary,
             )
         except Exception:
             logger.exception("Failed to process call transcript")
