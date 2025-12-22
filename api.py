@@ -15,8 +15,13 @@ logger = logging.getLogger("api")
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")  # Ensure this environment variable is set
 
-def _run_call_processor(*, transcript_id: int, raw_transcription: str) -> None:
-    payload = {"transcript_id": transcript_id, "raw_transcription": raw_transcription}
+def _run_call_processor(
+    *,
+    transcript_id: int,
+    raw_transcription: str,
+    summarize: bool = False,
+) -> None:
+    payload = {"transcript_id": transcript_id, "raw_transcription": raw_transcription, "summarize": summarize}
     proc = subprocess.run(
         [sys.executable, os.path.join(os.path.dirname(__file__), "call_processor.py")],
         input=json.dumps(payload).encode("utf-8"),
