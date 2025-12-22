@@ -67,11 +67,16 @@ async def get_transcription(
     uniqueid = (input_params.get("uniqueid") or "").strip()
     channel0_name = (input_params.get("channel0_name") or "").strip()
     channel1_name = (input_params.get("channel1_name") or "").strip()
+    # Persist only when explicitly requested.
+    persist = (input_params.get("persist") or "false").lower() in ("1", "true", "yes")
+    summarize = (input_params.get("summarize") or "false").lower() in ("1", "true", "yes")
 
-    try:
-        db.validate_uniqueid(uniqueid)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    # uniqueid is only required when persistence is enabled.
+    if persist:
+        try:
+            db.validate_uniqueid(uniqueid)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     # Valid Deepgram REST API parameters for /v1/listen endpoint
     deepgram_params = {
@@ -104,7 +109,7 @@ async def get_transcription(
         "replace" : "",
         "search" : "",
         "sentiment" : "false",
-        "smart_format" : "",
+        "smart_format" : "true",
         "summarize" : "",
         "tag" : "",
         "topics" : "",
@@ -172,6 +177,7 @@ async def get_transcription(
     result = response.json()
     try:
         raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
+        detected_language = result["results"].get("detected_language", None)
         if channel0_name:
             raw_transcription = raw_transcription.replace("Channel 0:", f"{channel0_name}:")
         if channel1_name:
@@ -179,20 +185,26 @@ async def get_transcription(
     except (KeyError, IndexError):
         raise HTTPException(status_code=500, detail="Failed to parse transcription response.")
 
-    # Persist raw transcript always (when Postgres config is present)
+    # Persist raw transcript when Postgres config is present (default) unless disabled per request.
     transcript_id = None
-    if db.is_configured():
+    if db.is_configured() and persist:
         try:
             transcript_id = await run_in_threadpool(
                 db.upsert_transcript_raw,
                 uniqueid=uniqueid,
                 raw_transcription=raw_transcription,
             )
+        except ValueError as e:
+            logger.exception("Invalid uniqueid for Postgres persistence")
+            raise HTTPException(status_code=400, detail=str(e))
         except Exception:
             logger.exception("Failed to persist raw transcript to Postgres")
             raise HTTPException(status_code=500, detail="Failed to persist transcription")
     else:
-        logger.warning("PGVECTOR_* env vars not set; skipping Postgres persistence")
+        if not db.is_configured():
+            logger.warning("PGVECTOR_* env vars not set; skipping Postgres persistence")
+        else:
+            logger.debug("Postgres persistence disabled by request")
 
     # Optional AI enrichment (clean/summary/sentiment) via per-request subprocess
     if os.getenv("OPENAI_API_KEY") and transcript_id is not None and raw_transcription:
@@ -201,8 +213,9 @@ async def get_transcription(
                 _run_call_processor,
                 transcript_id=transcript_id,
                 raw_transcription=raw_transcription,
+                summarize=summarize,
             )
         except Exception:
             logger.exception("Failed to process call transcript")
 
-    return {"transcript": raw_transcription}
+    return {"transcript": raw_transcription, "detected_language": detected_language}

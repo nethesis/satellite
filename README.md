@@ -92,7 +92,7 @@ PGVECTOR_DATABASE=satellite
 - `HTTP_PORT`: Port for the HTTP server (default: 8000)
 
 #### Postgres Vectorstore Configuration
-If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` will persist the raw transcription to Postgres.
+If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` can persist the raw transcription to Postgres when the request includes `persist=true` and a valid `uniqueid`.
 
 The database schema is created automatically on first use and includes:
 - `transcripts`: stores `uniqueid`, diarized raw transcription (Deepgram paragraphs transcript), optional cleaned transcription + summary, and `sentiment` (0-10)
@@ -111,18 +111,32 @@ This requires the `vector` extension (pgvector) in your Postgres instance.
 
 #### `POST /api/get_transcription`
 
-This endpoint requires a multipart form field named `uniqueid` (Asterisk-style uniqueid like `1234567890.1234`) in addition to the WAV file.
+Accepts a WAV upload and returns a Deepgram transcription.
+
+Request requirements:
+- Content type: multipart form upload with a `file` field (`audio/wav` or `audio/x-wav`)
+
+Optional fields (query string or multipart form fields):
+- `uniqueid`: Asterisk-style uniqueid like `1234567890.1234` (required only when `persist=true`)
+- `persist`: `true|false` (default `false`) — persist raw transcript to Postgres (requires `PGVECTOR_*` env vars)
+- `summarize`: `true|false` (default `false`) — run AI enrichment (requires `OPENAI_API_KEY` and also `persist=true` so there is a DB record to update)
+- `channel0_name`, `channel1_name`: rename diarization labels in the returned transcript (replaces `Channel 0:` / `Channel 1:`)
+
+Deepgram parameters:
+- Most Deepgram `/v1/listen` parameters may be provided as query/form fields and are passed through to Deepgram.
 
 Example:
 ```
 curl -X POST http://127.0.0.1:8000/api/get_transcription \
-	-F uniqueid=1234567890.1234 \
-	-F file=@call.wav;type=audio/wav
+    -F uniqueid=1234567890.1234 \
+    -F persist=true \
+    -F summarize=true \
+    -F file=@call.wav;type=audio/wav
 ```
 
-If `PGVECTOR_*` is configured, the raw transcription is saved to Postgres.
-If `OPENAI_API_KEY` is set, the service also generates a cleaned transcription, summary, and sentiment score (0-10) via a per-request subprocess worker (`call_processor.py`) and stores them in Postgres.
-If `OPENAI_API_KEY` is missing, clean/summary/sentiment are skipped.
+If `persist=true` and `PGVECTOR_*` is configured, the raw transcription is saved to Postgres.
+If `summarize=true` and `OPENAI_API_KEY` is set, the service also generates a cleaned transcription, summary, and sentiment score (0-10) via a per-request subprocess worker (`call_processor.py`) and stores them in Postgres.
+If `OPENAI_API_KEY` is missing (or `persist=false`), clean/summary/sentiment are skipped.
 
 ## Architecture
 

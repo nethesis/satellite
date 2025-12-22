@@ -23,16 +23,26 @@ def main() -> int:
         payload = _read_stdin_json()
         transcript_id = int(payload["transcript_id"])
         raw_transcription = str(payload["raw_transcription"])
+        summarize = bool(payload.get("summarize", False))
 
-        cleaned, summary, sentiment = ai.generate_clean_summary_sentiment(raw_transcription)
+        if db.is_configured():
+            db.replace_transcript_embeddings(
+                transcript_id=transcript_id,
+                raw_transcription=raw_transcription,
+            )
 
-        db.update_transcript_ai_fields(
-            transcript_id=transcript_id,
-            cleaned_transcription=cleaned,
-            summary=summary,
-            sentiment=sentiment,
-        )
+            if not summarize:
+                sys.stdout.write(json.dumps({"ok": True, "sentiment": None}))
+                return 0
 
+            cleaned, summary, sentiment = ai.generate_clean_summary_sentiment(raw_transcription)
+
+            db.update_transcript_ai_fields(
+                transcript_id=transcript_id,
+                cleaned_transcription=cleaned,
+                summary=summary,
+                sentiment=sentiment,
+            )
         sys.stdout.write(json.dumps({"ok": True, "sentiment": sentiment}))
         return 0
     except Exception:

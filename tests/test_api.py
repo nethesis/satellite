@@ -39,10 +39,11 @@ class TestGetTranscription:
     """Tests for the /api/get_transcription endpoint."""
 
     def test_missing_uniqueid(self, client, valid_wav_content):
-        """Test that missing uniqueid form field is rejected."""
+        """Test that missing uniqueid is rejected when persistence is requested."""
         response = client.post(
             "/api/get_transcription",
             files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"persist": "true"},
         )
 
         assert response.status_code == 400
@@ -121,7 +122,7 @@ class TestGetTranscription:
             response = client.post(
                 "/api/get_transcription",
                 files={"file": ("test.wav", valid_wav_content, "audio/wav")},
-                data={"uniqueid": "1234567890.1234"},
+                data={"uniqueid": "1234567890.1234", "persist": "true"},
             )
 
         assert response.status_code == 200
