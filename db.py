@@ -82,6 +82,9 @@ def _ensure_schema() -> None:
         # We may need to install the extension first.
         with _connect_without_pgvector() as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            # Be explicit: ensure the extension is committed before creating tables
+            # that depend on it.
+            conn.commit()
 
             conn.execute(
                 """
@@ -116,16 +119,22 @@ def _ensure_schema() -> None:
                 "CREATE INDEX IF NOT EXISTS transcript_chunks_transcript_id_idx ON transcript_chunks (transcript_id)"
             )
 
+            # Commit the core schema changes explicitly for clarity.
+            conn.commit()
+
             # "Modern" pgvector index: HNSW (if supported by server pgvector version)
             try:
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS transcript_chunks_embedding_hnsw
-                    ON transcript_chunks
-                    USING hnsw (embedding vector_cosine_ops)
-                    WITH (m = 16, ef_construction = 64)
-                    """
-                )
+                # Run this in its own transaction so a failure doesn't leave the
+                # connection in an aborted transaction state.
+                with conn.transaction():
+                    conn.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS transcript_chunks_embedding_hnsw
+                        ON transcript_chunks
+                        USING hnsw (embedding vector_cosine_ops)
+                        WITH (m = 16, ef_construction = 64)
+                        """
+                    )
             except Exception:
                 logger.warning("HNSW index creation failed; pgvector may be too old", exc_info=True)
 
