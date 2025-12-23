@@ -7,7 +7,6 @@ import logging
 import subprocess
 import sys
 
-import ai
 import db
 
 app = FastAPI()
