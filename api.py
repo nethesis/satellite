@@ -181,13 +181,19 @@ async def get_transcription(
 
     result = response.json()
     try:
-        if "multichannel" in params and params["multichannel"] == "true":
+        if "paragraphs" in result["results"] and "transcript" in result["results"]["paragraphs"]:
             raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
-            detected_language = result["results"].get("detected_language", None)
-        else:
+        elif "channels" in result["results"] and "alternatives" in result["results"]["channels"][0]:
             raw_transcription = result["results"]["channels"][0]["alternatives"][0]["paragraphs"]["transcript"].strip()
-            detected_language = result["results"]["channels"][0].get("detected_language", None)
-
+        else:
+            logger.debug("failed to get paragraphs transcript")
+            logger.debug(result)
+            raise KeyError("paragraphs transcript not found")
+        if "channels" in result["results"] and "detected_language" in result["results"]["channels"][0]:
+            detected_language = result["results"]["channels"][0]["detected_language"]
+        else:
+            logger.debug("failed to get detected_language")
+            logger.debug(result)
         if channel0_name:
             raw_transcription = raw_transcription.replace("Channel 0:", f"{channel0_name}:")
         if channel1_name:
