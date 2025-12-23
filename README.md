@@ -130,7 +130,7 @@ Example:
 curl -X POST http://127.0.0.1:8000/api/get_transcription \
     -F uniqueid=1234567890.1234 \
     -F persist=true \
-    -F summarize=true \
+    -F summary=true \
     -F file=@call.wav;type=audio/wav
 ```
 
