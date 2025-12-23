@@ -184,8 +184,17 @@ async def get_transcription(
     try:
         if "paragraphs" in result["results"] and "transcript" in result["results"]["paragraphs"]:
             raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
-        elif "channels" in result["results"] and "alternatives" in result["results"]["channels"][0]:
-            raw_transcription = result["results"]["channels"][0]["alternatives"][0]["paragraphs"]["transcript"].strip()
+        elif (
+            "channels" in result["results"]
+            and result["results"]["channels"]
+            and "alternatives" in result["results"]["channels"][0]
+            and result["results"]["channels"][0]["alternatives"]
+            and "paragraphs" in result["results"]["channels"][0]["alternatives"][0]
+            and "transcript" in result["results"]["channels"][0]["alternatives"][0]["paragraphs"]
+        ):
+            raw_transcription = (
+                result["results"]["channels"][0]["alternatives"][0]["paragraphs"]["transcript"].strip()
+            )
         else:
             logger.debug("failed to get paragraphs transcript")
             logger.debug(result)
