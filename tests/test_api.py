@@ -78,7 +78,7 @@ class TestGetTranscription:
         response = client.post(
             "/api/get_transcription",
             files={"file": ("test.wav", valid_wav_content, "audio/wav")},
-            data={"uniqueid": "1234567890.1234"},
+            data={"uniqueid": "1234567890.1234", "multichannel": "true"},
         )
 
         # Assertions
@@ -122,7 +122,7 @@ class TestGetTranscription:
             response = client.post(
                 "/api/get_transcription",
                 files={"file": ("test.wav", valid_wav_content, "audio/wav")},
-                data={"uniqueid": "1234567890.1234", "persist": "true"},
+                data={"uniqueid": "1234567890.1234", "persist": "true", "multichannel": "true"},
             )
 
         assert response.status_code == 200
