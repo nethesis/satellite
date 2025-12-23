@@ -135,7 +135,7 @@ curl -X POST http://127.0.0.1:8000/api/get_transcription \
 ```
 
 If `persist=true` and `PGVECTOR_*` is configured, the raw transcription is saved to Postgres.
-If `summarize=true` and `OPENAI_API_KEY` is set, the service also generates a cleaned transcription, summary, and sentiment score (0-10) via a per-request subprocess worker (`call_processor.py`) and stores them in Postgres.
+If `summary=true` and `OPENAI_API_KEY` is set, the service also generates a cleaned transcription, summary, and sentiment score (0-10) via a per-request subprocess worker (`call_processor.py`) and stores them in Postgres.
 If `OPENAI_API_KEY` is missing (or `persist=false`), clean/summary/sentiment are skipped.
 
 ## Architecture
