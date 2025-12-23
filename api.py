@@ -103,7 +103,7 @@ async def get_transcription(
         "keywords" : "",
         "language" : "",
         "measurements" : "",
-        "mip_opt_out" : "", # Opts out requests from the Deepgram Model Improvement Program
+        "mip_opt_out" : "", # When true, opts out of the Deepgram Model Improvement Program
         "model" : "nova-3",
         "multichannel" : "",
         "numerals" : "true",
