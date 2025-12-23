@@ -43,7 +43,7 @@ def main() -> int:
                 summary=summary,
                 sentiment=sentiment,
             )
-        sys.stdout.write(json.dumps({"ok": True, "sentiment": sentiment}))
+            sys.stdout.write(json.dumps({"ok": True, "sentiment": sentiment}))
         return 0
     except Exception:
         logger.exception("Call processing failed")
