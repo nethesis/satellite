@@ -248,29 +248,4 @@ class DeepgramConnector:
                 "raw_transcription": text
             })
         )
-        # Process AI summary in background without blocking
-        asyncio.create_task(self._process_ai_summary(text))
 
-    async def _process_ai_summary(self, text):
-        """Process AI summary and cleaning in background thread"""
-        try:
-            from ai import get_summary, get_clean
-            # Run synchronous AI calls in a thread to avoid blocking the event loop
-            clean_text = await asyncio.to_thread(get_clean, text)
-            await self.mqtt_client.publish(
-                topic='final',
-                payload=json.dumps({
-                    "uniqueid": self.uniqueid,
-                    "clean_transcription": clean_text
-                })
-            )
-            summary = await asyncio.to_thread(get_summary, text)
-            await self.mqtt_client.publish(
-                topic='final',
-                payload=json.dumps({
-                    "uniqueid": self.uniqueid,
-                    "summary": summary
-                })
-            )
-        except Exception as e:
-            logger.error(f"Error processing transcription: {e}")
