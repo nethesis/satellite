@@ -2,7 +2,7 @@ import logging
 import os
 import re
 import threading
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional
 
 import psycopg
 from pgvector.psycopg import register_vector
