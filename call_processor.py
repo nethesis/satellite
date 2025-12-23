@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import sys
 from typing import Any, Dict
 
@@ -17,13 +18,25 @@ def _read_stdin_json() -> Dict[str, Any]:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO)
+    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
+    )
 
     try:
         payload = _read_stdin_json()
         transcript_id = int(payload["transcript_id"])
         raw_transcription = str(payload["raw_transcription"])
         summary = bool(payload.get("summary", False))
+
+        logger.info(
+            "Processing transcript_id=%s raw_len=%d summary=%s",
+            transcript_id,
+            len(raw_transcription or ""),
+            summary,
+        )
 
         if db.is_configured():
             db.replace_transcript_embeddings(
@@ -32,10 +45,18 @@ def main() -> int:
             )
 
             if not summary:
+                logger.info("Skipping AI summary/sentiment (summary=false)")
                 sys.stdout.write(json.dumps({"ok": True, "sentiment": None}))
                 return 0
 
+            logger.info("Starting AI enrichment")
             cleaned, summary, sentiment = ai.generate_clean_summary_sentiment(raw_transcription)
+            logger.info(
+                "AI enrichment done (cleaned_len=%d summary_len=%d sentiment=%s)",
+                len(cleaned or ""),
+                len(summary or ""),
+                sentiment,
+            )
 
             db.update_transcript_ai_fields(
                 transcript_id=transcript_id,

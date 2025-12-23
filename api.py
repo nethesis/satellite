@@ -28,6 +28,20 @@ def _run_call_processor(
         stderr=subprocess.PIPE,
         timeout=float(os.getenv("CALL_PROCESSOR_TIMEOUT_SECONDS", "600")),
     )
+
+    # The subprocess logs (including ai pipeline logs) go to stderr by default.
+    # Since we're capturing stderr, re-log it here so it shows up in the API logs
+    # even when the subprocess succeeds.
+    stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
+    if stderr_text.strip():
+        lines = stderr_text.splitlines()
+        max_lines = int(os.getenv("CALL_PROCESSOR_LOG_MAX_LINES", "200"))
+        if len(lines) > max_lines:
+            lines = lines[:max_lines] + [f"... (truncated; {len(stderr_text)} bytes total)"]
+        for line in lines:
+            if line.strip():
+                logger.info("call_processor[%s]: %s", transcript_id, line)
+
     if proc.returncode != 0:
         stderr_preview = (proc.stderr or b"")[:2000].decode("utf-8", errors="replace")
         stdout_preview = (proc.stdout or b"")[:2000].decode("utf-8", errors="replace")
