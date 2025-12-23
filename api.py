@@ -180,6 +180,7 @@ async def get_transcription(
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
     result = response.json()
+    detected_language = None  # always define; mocks may omit this field
     try:
         if "paragraphs" in result["results"] and "transcript" in result["results"]["paragraphs"]:
             raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
