@@ -23,7 +23,7 @@ def main() -> int:
         payload = _read_stdin_json()
         transcript_id = int(payload["transcript_id"])
         raw_transcription = str(payload["raw_transcription"])
-        summarize = bool(payload.get("summarize", False))
+        summary = bool(payload.get("summary", False))
 
         if db.is_configured():
             db.replace_transcript_embeddings(
@@ -31,7 +31,7 @@ def main() -> int:
                 raw_transcription=raw_transcription,
             )
 
-            if not summarize:
+            if not summary:
                 sys.stdout.write(json.dumps({"ok": True, "sentiment": None}))
                 return 0
 
