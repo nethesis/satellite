@@ -38,7 +38,8 @@ def valid_wav_content():
 class TestGetTranscription:
     """Tests for the /api/get_transcription endpoint."""
 
-    def test_missing_uniqueid(self, client, valid_wav_content):
+    @patch("api.db.is_configured", return_value=False)
+    def test_missing_uniqueid(self, mock_db_configured, client, valid_wav_content):
         """Test that missing uniqueid is rejected when persistence is requested."""
         response = client.post(
             "/api/get_transcription",
