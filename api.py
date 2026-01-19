@@ -96,6 +96,18 @@ async def get_transcription(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    transcript_id = None
+    if db.is_configured() and persist:
+        # Create/mark a DB row immediately so we can track state even if Deepgram fails.
+        try:
+            transcript_id = await run_in_threadpool(
+                db.upsert_transcript_progress,
+                uniqueid=uniqueid,
+            )
+        except Exception:
+            logger.exception("Failed to initialize transcript row for state tracking")
+            raise HTTPException(status_code=500, detail="Failed to initialize transcript persistence")
+
     # Valid Deepgram REST API parameters for /v1/listen endpoint
     deepgram_params = {
         "callback": "",
@@ -175,6 +187,11 @@ async def get_transcription(
                 logger.debug("Failed to log Deepgram response preview")
             response.raise_for_status()
     except httpx.HTTPStatusError as e:
+        if transcript_id is not None:
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
+            except Exception:
+                logger.exception("Failed to update transcript state=failed")
         try:
             status = e.response.status_code if e.response is not None else "unknown"
             body_preview = e.response.text[:500] if e.response is not None and hasattr(e.response, "text") and e.response.text else ""
@@ -184,12 +201,27 @@ async def get_transcription(
         raise HTTPException(status_code=e.response.status_code, detail=f"Deepgram API error: {e.response.text}")
     except httpx.TimeoutException:
         logger.warning("Deepgram request timed out (uniqueid=%s)", uniqueid)
+        if transcript_id is not None:
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
+            except Exception:
+                logger.exception("Failed to update transcript state=failed")
         raise HTTPException(status_code=504, detail="Deepgram request timed out")
     except httpx.RequestError as e:
         logger.error("Deepgram request failed (uniqueid=%s): %s", uniqueid, str(e))
+        if transcript_id is not None:
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
+            except Exception:
+                logger.exception("Failed to update transcript state=failed")
         raise HTTPException(status_code=502, detail="Failed to reach Deepgram")
     except Exception as e:
         logger.exception("Unexpected error while calling Deepgram")
+        if transcript_id is not None:
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
+            except Exception:
+                logger.exception("Failed to update transcript state=failed")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
     result = response.json()
@@ -223,11 +255,15 @@ async def get_transcription(
             raw_transcription = raw_transcription.replace("Channel 1:", f"{channel1_name}:")
     except (KeyError, IndexError):
         logger.error("Failed to parse Deepgram transcription response: %s", response.text)
+        if transcript_id is not None:
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
+            except Exception:
+                logger.exception("Failed to update transcript state=failed")
         raise HTTPException(status_code=500, detail="Failed to parse transcription response.")
 
     # Persist raw transcript when Postgres config is present (default) unless disabled per request.
-    transcript_id = None
-    if db.is_configured() and persist:
+    if transcript_id is not None:
         try:
             transcript_id = await run_in_threadpool(
                 db.upsert_transcript_raw,
@@ -236,9 +272,17 @@ async def get_transcription(
             )
         except ValueError as e:
             logger.exception("Invalid uniqueid for Postgres persistence")
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
+            except Exception:
+                logger.exception("Failed to update transcript state=failed")
             raise HTTPException(status_code=400, detail=str(e))
         except Exception:
             logger.exception("Failed to persist raw transcript to Postgres")
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
+            except Exception:
+                logger.exception("Failed to update transcript state=failed")
             raise HTTPException(status_code=500, detail="Failed to persist transcription")
     else:
         if not db.is_configured():
@@ -247,15 +291,30 @@ async def get_transcription(
             logger.debug("Postgres persistence disabled by request")
 
     # Optional AI enrichment (clean/summary/sentiment) via per-request subprocess
+    did_enrichment = False
     if os.getenv("OPENAI_API_KEY") and transcript_id is not None and raw_transcription:
         try:
+            did_enrichment = True
+            await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="summarizing")
             await run_in_threadpool(
                 _run_call_processor,
                 transcript_id=transcript_id,
                 raw_transcription=raw_transcription,
                 summary=summary,
             )
+            await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="done")
         except Exception:
             logger.exception("Failed to process call transcript")
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
+            except Exception:
+                logger.exception("Failed to update transcript state=failed")
+
+    # If we persisted but didn't run enrichment, the pipeline is complete after raw transcript is stored.
+    if transcript_id is not None and not did_enrichment:
+        try:
+            await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="done")
+        except Exception:
+            logger.exception("Failed to update transcript state=done")
 
     return {"transcript": raw_transcription, "detected_language": detected_language}

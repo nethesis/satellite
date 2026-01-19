@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, Mock
 from io import BytesIO
 import httpx
+import os
 
 
 @pytest.fixture
@@ -117,8 +118,11 @@ class TestGetTranscription:
         async def fake_run_in_threadpool(func, *args, **kwargs):
             return func(*args, **kwargs)
 
-        with patch("api.db.is_configured", return_value=True), \
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
+             patch("api.db.is_configured", return_value=True), \
+             patch("api.db.upsert_transcript_progress", return_value=123) as progress_mock, \
              patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
+             patch("api.db.set_transcript_state") as state_mock, \
              patch("api.run_in_threadpool", new=fake_run_in_threadpool):
             response = client.post(
                 "/api/get_transcription",
@@ -127,10 +131,13 @@ class TestGetTranscription:
             )
 
         assert response.status_code == 200
+
+        progress_mock.assert_called_once_with(uniqueid="1234567890.1234")
         upsert_mock.assert_called_once_with(
             uniqueid="1234567890.1234",
             raw_transcription="SPEAKER 1: Hello world",
         )
+        state_mock.assert_any_call(transcript_id=123, state="done")
 
     def test_invalid_file_type(self, client):
         """Test that non-WAV files are rejected."""

@@ -95,8 +95,14 @@ PGVECTOR_DATABASE=satellite
 If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` can persist the raw transcription to Postgres when the request includes `persist=true` and a valid `uniqueid`.
 
 The database schema is created automatically on first use and includes:
-- `transcripts`: stores `uniqueid`, diarized raw transcription (Deepgram paragraphs transcript), optional cleaned transcription + summary, and `sentiment` (0-10)
+- `transcripts`: stores `uniqueid`, diarized raw transcription (Deepgram paragraphs transcript), `state`, optional cleaned transcription + summary, and `sentiment` (0-10)
 - `transcript_chunks`: table for storing chunked `text-embedding-3-small` embeddings in a `vector(1536)` column for similarity search
+
+`transcripts.state` is DB-only and represents the processing lifecycle:
+- `progress`: request accepted and persistence row created, transcription not yet stored
+- `failed`: pipeline failed (Deepgram error, parsing error, persistence error, or enrichment error)
+- `summarizing`: AI enrichment running (subprocess worker)
+- `done`: pipeline finished (raw transcript stored; enrichment finished if enabled)
 
 This requires the `vector` extension (pgvector) in your Postgres instance.
 
@@ -137,6 +143,8 @@ curl -X POST http://127.0.0.1:8000/api/get_transcription \
 If `persist=true` and `PGVECTOR_*` is configured, the raw transcription is saved to Postgres.
 If `summary=true` and `OPENAI_API_KEY` is set, the service also generates a cleaned transcription, summary, and sentiment score (0-10) via a per-request subprocess worker (`call_processor.py`) and stores them in Postgres.
 If `OPENAI_API_KEY` is missing (or `persist=false`), clean/summary/sentiment are skipped.
+
+When `persist=true`, `POST /api/get_transcription` updates `transcripts.state` as it runs: `progress` → (`summarizing` →) `done`, or `failed` on errors.
 
 ## Architecture
 

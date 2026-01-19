@@ -18,6 +18,9 @@ _EMBEDDING_MODEL = "text-embedding-3-small"
 # OpenAI text-embedding-3-small is 1536 dims.
 _EMBEDDING_DIM = 1536
 
+
+TRANSCRIPT_STATES = ("progress", "failed", "summarizing", "done")
+
 _schema_lock = threading.Lock()
 _schema_initialized = False
 
@@ -92,6 +95,7 @@ def _ensure_schema() -> None:
                     id BIGSERIAL PRIMARY KEY,
                     uniqueid TEXT NOT NULL UNIQUE,
                     raw_transcription TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'done',
                     cleaned_transcription TEXT,
                     summary TEXT,
                     sentiment SMALLINT CHECK (sentiment BETWEEN 0 AND 10),
@@ -100,6 +104,29 @@ def _ensure_schema() -> None:
                 )
                 """
             )
+
+            # Upgrade older databases that predate the `state` column.
+            # Keep this idempotent so it can run on every startup safely.
+            conn.execute(
+                """
+                ALTER TABLE transcripts
+                ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'done'
+                """
+            )
+
+            # Best-effort constraint to keep state values sane.
+            # (No IF NOT EXISTS for constraints; ignore if already present.)
+            try:
+                conn.execute(
+                    """
+                    ALTER TABLE transcripts
+                    ADD CONSTRAINT transcripts_state_check
+                    CHECK (state IN ('progress', 'failed', 'summarizing', 'done'))
+                    """
+                )
+            except Exception:
+                # Could be duplicate constraint, permissions, or older PG; non-fatal.
+                logger.debug("Skipping transcripts_state_check constraint creation", exc_info=True)
 
             conn.execute(
                 f"""
@@ -149,6 +176,73 @@ def validate_uniqueid(uniqueid: str) -> None:
         raise ValueError("Missing required form field 'uniqueid'")
     if not _uniqueid_re.match(uniqueid.strip()):
         raise ValueError("Invalid 'uniqueid' format; expected like 1234567890.1234")
+
+
+def validate_transcript_state(state: str) -> None:
+    if state not in TRANSCRIPT_STATES:
+        raise ValueError(f"Invalid transcript state {state!r}; expected one of {', '.join(TRANSCRIPT_STATES)}")
+
+
+def upsert_transcript_progress(*, uniqueid: str) -> int:
+    """Ensure a transcript row exists and mark it as 'progress'. Returns transcript id.
+
+    This is used to represent a requested transcription before the Deepgram request
+    completes.
+    """
+
+    validate_uniqueid(uniqueid)
+    _ensure_schema()
+
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO transcripts (uniqueid, raw_transcription, state)
+            VALUES (%s, %s, 'progress')
+            ON CONFLICT (uniqueid)
+            DO UPDATE SET
+                state = 'progress',
+                updated_at = now()
+            RETURNING id
+            """,
+            (uniqueid, ""),
+        ).fetchone()
+
+        if row is None:
+            raise RuntimeError("Failed to upsert transcript progress row")
+        return int(row[0])
+
+
+def set_transcript_state(*, transcript_id: int, state: str) -> None:
+    validate_transcript_state(state)
+    _ensure_schema()
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE transcripts
+            SET state = %s,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (state, transcript_id),
+        )
+
+
+def set_transcript_state_by_uniqueid(*, uniqueid: str, state: str) -> None:
+    validate_uniqueid(uniqueid)
+    validate_transcript_state(state)
+    _ensure_schema()
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE transcripts
+            SET state = %s,
+                updated_at = now()
+            WHERE uniqueid = %s
+            """,
+            (state, uniqueid),
+        )
 
 
 def upsert_transcript_raw(
