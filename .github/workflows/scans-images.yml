@@ -97,7 +97,7 @@ jobs:
           SAFE_NAME=$(echo "${{ matrix.image }}" | sed 's/[^a-zA-Z0-9]/-/g')
           echo "safe_name=${SAFE_NAME}" >> $GITHUB_OUTPUT
       - name: Upload CycloneDX SBOM
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ steps.safe-filename.outputs.safe_name }}-cyclonedx-sbom
           path: sbom-${{ github.run_id }}-${{ github.run_attempt }}.cdx.json

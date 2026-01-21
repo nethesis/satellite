@@ -55,7 +55,7 @@ jobs:
           format: cyclonedx
           output: sbom.cdx.json
       - name: Upload CycloneDX SBOM
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: repo-cyclonedx-sbom
           path: sbom.cdx.json
