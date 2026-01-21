@@ -99,34 +99,12 @@ def _ensure_schema() -> None:
                     cleaned_transcription TEXT,
                     summary TEXT,
                     sentiment SMALLINT CHECK (sentiment BETWEEN 0 AND 10),
+                    CONSTRAINT transcripts_state_check CHECK (state IN ('progress', 'failed', 'summarizing', 'done')),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
             )
-
-            # Upgrade older databases that predate the `state` column.
-            # Keep this idempotent so it can run on every startup safely.
-            conn.execute(
-                """
-                ALTER TABLE transcripts
-                ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'done'
-                """
-            )
-
-            # Best-effort constraint to keep state values sane.
-            # (No IF NOT EXISTS for constraints; ignore if already present.)
-            try:
-                conn.execute(
-                    """
-                    ALTER TABLE transcripts
-                    ADD CONSTRAINT transcripts_state_check
-                    CHECK (state IN ('progress', 'failed', 'summarizing', 'done'))
-                    """
-                )
-            except Exception:
-                # Could be duplicate constraint, permissions, or older PG; non-fatal.
-                logger.debug("Skipping transcripts_state_check constraint creation", exc_info=True)
 
             conn.execute(
                 f"""
