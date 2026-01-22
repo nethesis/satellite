@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.concurrency import run_in_threadpool
 import json
 import httpx
@@ -13,6 +13,34 @@ app = FastAPI()
 logger = logging.getLogger("api")
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")  # Ensure this environment variable is set
+
+
+def _require_api_token_if_configured(request: Request) -> None:
+    configured_token = (os.getenv("API_TOKEN") or "").strip()
+    if not configured_token:
+        return
+
+    provided_token = None
+
+    auth = (request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        provided_token = auth[7:].strip()
+
+    if not provided_token:
+        provided_token = (request.headers.get("x-api-token") or "").strip() or None
+
+    if not provided_token or provided_token != configured_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+api_router = APIRouter(
+    prefix="/api",
+    dependencies=[Depends(_require_api_token_if_configured)],
+)
 
 def _run_call_processor(
     *,
@@ -55,7 +83,7 @@ def _get_deepgram_timeout_seconds() -> float:
         logger.warning("Invalid DEEPGRAM_TIMEOUT_SECONDS=%r; defaulting to 300", raw)
         return 300.0
 
-@app.post('/api/get_transcription')
+@api_router.post('/get_transcription')
 async def get_transcription(
     request: Request,
     file: UploadFile = File(...)
@@ -318,3 +346,6 @@ async def get_transcription(
             logger.exception("Failed to update transcript state=done")
 
     return {"transcript": raw_transcription, "detected_language": detected_language}
+
+
+app.include_router(api_router)

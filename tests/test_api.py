@@ -9,6 +9,12 @@ import httpx
 import os
 
 
+@pytest.fixture(autouse=True)
+def _unset_api_token(monkeypatch):
+    """Ensure local env doesn't accidentally enable auth during tests."""
+    monkeypatch.delenv("API_TOKEN", raising=False)
+
+
 @pytest.fixture
 def client():
     """Create a test client for the FastAPI app."""
@@ -38,6 +44,68 @@ def valid_wav_content():
 
 class TestGetTranscription:
     """Tests for the /api/get_transcription endpoint."""
+
+    def test_auth_enabled_missing_token_returns_401(self, client, valid_wav_content):
+        with patch.dict(os.environ, {"API_TOKEN": "secret"}):
+            response = client.post(
+                "/api/get_transcription",
+                files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+                data={"uniqueid": "1234567890.1234"},
+            )
+
+        assert response.status_code == 401
+
+    def test_auth_enabled_wrong_token_returns_401(self, client, valid_wav_content):
+        with patch.dict(os.environ, {"API_TOKEN": "secret"}):
+            response = client.post(
+                "/api/get_transcription",
+                headers={"Authorization": "Bearer wrong"},
+                files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+                data={"uniqueid": "1234567890.1234"},
+            )
+
+        assert response.status_code == 401
+
+    @patch('httpx.AsyncClient')
+    def test_auth_enabled_valid_token_allows_request(self, mock_client_class, client, valid_wav_content):
+        """When API_TOKEN is set, /api endpoints require a matching token."""
+        # Mock the Deepgram API response
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "results": {
+                "paragraphs": {"transcript": "SPEAKER 1: Hello world"},
+                "channels": [
+                    {
+                        "alternatives": [
+                            {"transcript": "Hello world"}
+                        ]
+                    }
+                ]
+            }
+        }
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        with patch.dict(os.environ, {"API_TOKEN": "secret"}):
+            response = client.post(
+                "/api/get_transcription",
+                headers={"Authorization": "Bearer secret"},
+                files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+                data={"uniqueid": "1234567890.1234", "multichannel": "true"},
+            )
+
+        assert response.status_code == 200
+
+    def test_docs_not_protected_by_api_token(self, client):
+        with patch.dict(os.environ, {"API_TOKEN": "secret"}):
+            response = client.get("/docs")
+
+        assert response.status_code == 200
 
     @patch("api.db.is_configured", return_value=False)
     def test_missing_uniqueid(self, mock_db_configured, client, valid_wav_content):
