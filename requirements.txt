@@ -4,8 +4,11 @@ deepgram-sdk==3.*
 fastapi
 langchain
 langchain_openai
+langchain-text-splitters
 numpy
 paho-mqtt==2.1.0
+pgvector
+psycopg[binary]
 python-dotenv
 pyaudio
 pydantic

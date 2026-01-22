@@ -11,6 +11,7 @@ If OpenAI API key is provided, it will be used to generate a summary of the tran
 - Real-time speech-to-text transcription via Deepgram
 - Publishes transcription results to MQTT
 - Handles multiple concurrent channels
+- (Optional) Persists transcriptions + vector embeddings to Postgres/pgvector
 
 ## Requirements
 
@@ -56,6 +57,13 @@ OPENAI_API_KEY=your_openai_api_key
 
 # Log level (optional)
 LOG_LEVEL=DEBUG
+
+# PGSQL Vectorstore Configuration
+PGVECTOR_HOST=localhost
+PGVECTOR_PORT=5432
+PGVECTOR_USER=postgres
+PGVECTOR_PASSWORD=your_password
+PGVECTOR_DATABASE=satellite
 ```
 
 ### Configuration Parameters
@@ -83,12 +91,60 @@ LOG_LEVEL=DEBUG
 #### Rest API Configuration
 - `HTTP_PORT`: Port for the HTTP server (default: 8000)
 
+#### Postgres Vectorstore Configuration
+If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` can persist the raw transcription to Postgres when the request includes `persist=true` and a valid `uniqueid`.
+
+The database schema is created automatically on first use and includes:
+- `transcripts`: stores `uniqueid`, diarized raw transcription (Deepgram paragraphs transcript), `state`, optional cleaned transcription + summary, and `sentiment` (0-10)
+- `transcript_chunks`: table for storing chunked `text-embedding-3-small` embeddings in a `vector(1536)` column for similarity search
+
+`transcripts.state` is DB-only and represents the processing lifecycle:
+- `progress`: request accepted and persistence row created, transcription not yet stored
+- `failed`: pipeline failed (Deepgram error, parsing error, persistence error, or enrichment error)
+- `summarizing`: AI enrichment running (subprocess worker)
+- `done`: pipeline finished (raw transcript stored; enrichment finished if enabled)
+
+This requires the `vector` extension (pgvector) in your Postgres instance.
+
 ## Usage
 
 1. Ensure Asterisk is configured with the appropriate ARI settings
 2. Make sure your MQTT broker is running
 3. Run the application: `python main.py`
 4. Configure Asterisk dialplan to direct calls to the Stasis application named "satellite"
+
+### REST API
+
+#### `POST /api/get_transcription`
+
+Accepts a WAV upload and returns a Deepgram transcription.
+
+Request requirements:
+- Content type: multipart form upload with a `file` field (`audio/wav` or `audio/x-wav`)
+
+Optional fields (query string or multipart form fields):
+- `uniqueid`: Asterisk-style uniqueid like `1234567890.1234` (required only when `persist=true`)
+- `persist`: `true|false` (default `false`) — persist raw transcript to Postgres (requires `PGVECTOR_*` env vars)
+- `summary`: `true|false` (default `false`) — run AI enrichment (requires `OPENAI_API_KEY` and also `persist=true` so there is a DB record to update)
+- `channel0_name`, `channel1_name`: rename diarization labels in the returned transcript (replaces `Channel 0:` / `Channel 1:`)
+
+Deepgram parameters:
+- Most Deepgram `/v1/listen` parameters may be provided as query/form fields and are passed through to Deepgram.
+
+Example:
+```
+curl -X POST http://127.0.0.1:8000/api/get_transcription \
+    -F uniqueid=1234567890.1234 \
+    -F persist=true \
+    -F summary=true \
+    -F file=@call.wav;type=audio/wav
+```
+
+If `persist=true` and `PGVECTOR_*` is configured, the raw transcription is saved to Postgres.
+If `summary=true` and `OPENAI_API_KEY` is set, the service also generates a cleaned transcription, summary, and sentiment score (0-10) via a per-request subprocess worker (`call_processor.py`) and stores them in Postgres.
+If `OPENAI_API_KEY` is missing (or `persist=false`), clean/summary/sentiment are skipped.
+
+When `persist=true`, `POST /api/get_transcription` updates `transcripts.state` as it runs: `progress` → (`summarizing` →) `done`, or `failed` on errors.
 
 ## Architecture
 
@@ -131,6 +187,16 @@ export MQTT_USERNAME=mqttuser
 export SATELLITE_MQTT_PASSWORD=mqttpass
 export DEEPGRAM_API_KEY=XXX
 export HTTP_PORT=8080
+
+# Optional: enable Postgres persistence in tests/manual runs
+export PGVECTOR_HOST=localhost
+export PGVECTOR_PORT=5432
+export PGVECTOR_USER=postgres
+export PGVECTOR_PASSWORD=your_password
+export PGVECTOR_DATABASE=satellite
+
+# Optional: enable clean/summary/embeddings
+export OPENAI_API_KEY=your_openai_api_key
 ```
 
 ### MQTT Broker

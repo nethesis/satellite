@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, Mock
 from io import BytesIO
 import httpx
+import os
 
 
 @pytest.fixture
@@ -38,6 +39,18 @@ def valid_wav_content():
 class TestGetTranscription:
     """Tests for the /api/get_transcription endpoint."""
 
+    @patch("api.db.is_configured", return_value=False)
+    def test_missing_uniqueid(self, mock_db_configured, client, valid_wav_content):
+        """Test that missing uniqueid is rejected when persistence is requested."""
+        response = client.post(
+            "/api/get_transcription",
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"persist": "true"},
+        )
+
+        assert response.status_code == 400
+        assert "uniqueid" in response.json()["detail"]
+
     @patch('httpx.AsyncClient')
     def test_valid_wav_file(self, mock_client_class, client, valid_wav_content):
         """Test transcription with a valid WAV file."""
@@ -45,12 +58,12 @@ class TestGetTranscription:
         mock_response = Mock()
         mock_response.json.return_value = {
             "results": {
+                "paragraphs": {"transcript": "SPEAKER 1: Hello world"},
                 "channels": [
                     {
                         "alternatives": [
                             {"transcript": "Hello world"}
-                        ],
-                        "detected_language": "en"
+                        ]
                     }
                 ]
             }
@@ -66,16 +79,65 @@ class TestGetTranscription:
         # Make the request
         response = client.post(
             "/api/get_transcription",
-            files={"file": ("test.wav", valid_wav_content, "audio/wav")}
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234", "multichannel": "true"},
         )
 
         # Assertions
         assert response.status_code == 200
         data = response.json()
         assert "transcript" in data
-        assert data["transcript"] == "Hello world"
-        assert "detected_language" in data
-        assert data["detected_language"] == "en"
+        assert data["transcript"] == "SPEAKER 1: Hello world"
+
+    @patch('httpx.AsyncClient')
+    def test_persists_raw_transcript_via_threadpool(self, mock_client_class, client, valid_wav_content):
+        """Ensure persistence path uses threadpool helper and forwards kwargs to db layer."""
+
+        # Mock the Deepgram API response
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "results": {
+                "paragraphs": {"transcript": "SPEAKER 1: Hello world"},
+                "channels": [
+                    {
+                        "alternatives": [
+                            {"transcript": "Hello world"}
+                        ]
+                    }
+                ]
+            }
+        }
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        async def fake_run_in_threadpool(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
+             patch("api.db.is_configured", return_value=True), \
+             patch("api.db.upsert_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
+             patch("api.db.set_transcript_state") as state_mock, \
+             patch("api.run_in_threadpool", new=fake_run_in_threadpool):
+            response = client.post(
+                "/api/get_transcription",
+                files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+                data={"uniqueid": "1234567890.1234", "persist": "true", "multichannel": "true"},
+            )
+
+        assert response.status_code == 200
+
+        progress_mock.assert_called_once_with(uniqueid="1234567890.1234")
+        upsert_mock.assert_called_once_with(
+            uniqueid="1234567890.1234",
+            raw_transcription="SPEAKER 1: Hello world",
+        )
+        state_mock.assert_any_call(transcript_id=123, state="done")
 
     def test_invalid_file_type(self, client):
         """Test that non-WAV files are rejected."""
@@ -109,11 +171,32 @@ class TestGetTranscription:
 
         response = client.post(
             "/api/get_transcription",
-            files={"file": ("test.wav", valid_wav_content, "audio/wav")}
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
         )
 
         assert response.status_code == 401
         assert "Deepgram API error" in response.json()["detail"]
+
+    @patch('httpx.AsyncClient')
+    def test_deepgram_timeout_returns_504(self, mock_client_class, client, valid_wav_content):
+        """Test that Deepgram timeouts are mapped to 504 Gateway Timeout."""
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=httpx.ReadTimeout("Timed out", request=Mock())
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        response = client.post(
+            "/api/get_transcription",
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
+        )
+
+        assert response.status_code == 504
+        assert "timed out" in response.json()["detail"].lower()
 
     @patch('httpx.AsyncClient')
     def test_malformed_deepgram_response(self, mock_client_class, client, valid_wav_content):
@@ -131,16 +214,17 @@ class TestGetTranscription:
 
         response = client.post(
             "/api/get_transcription",
-            files={"file": ("test.wav", valid_wav_content, "audio/wav")}
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
         )
 
         assert response.status_code == 500
         assert "Failed to parse transcription response" in response.json()["detail"]
 
     @patch('httpx.AsyncClient')
-    def test_no_detected_language(self, mock_client_class, client, valid_wav_content):
-        """Test transcription response when language detection is not available."""
-        # Mock response without detected_language field
+    def test_missing_paragraphs_transcript_is_error(self, mock_client_class, client, valid_wav_content):
+        """Diarized-only: missing paragraphs transcript returns 500."""
+        # Mock response without paragraphs transcript
         mock_response = Mock()
         mock_response.json.return_value = {
             "results": {
@@ -163,11 +247,10 @@ class TestGetTranscription:
 
         response = client.post(
             "/api/get_transcription",
-            files={"file": ("test.wav", valid_wav_content, "audio/wav")}
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
         )
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["transcript"] == "Test transcript"
-        assert data["detected_language"] is None
+        assert response.status_code == 500
+        assert "Failed to parse transcription response" in response.json()["detail"]
 

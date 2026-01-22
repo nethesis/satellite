@@ -1,3 +1,6 @@
+import logging
+import time
+
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -134,26 +137,43 @@ Maria Bianchi: Sì? dimmi pure
 {text}
 
 # Output:
-"""        )
-    ])
-    chain = prompt | llm
-    return chain.invoke({"text": text}).content
+""".strip(),
+            ),
+        ]
+    )
+    clean_chain = clean_prompt | llm
 
-def get_clean(text):
-    """
-    Cleanup the given text
-    """
-    llm = ChatOpenAI(temperature=0.3, model="gpt-5-mini")
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """
+    cleaned_chunks = []
+    for idx, chunk in enumerate(chunks):
+        try:
+            logger.debug("AI pipeline: cleaning chunk %d/%d (len=%d)", idx + 1, len(chunks), len(chunk))
+            cleaned_chunks.append(clean_chain.invoke({"text": chunk}).content)
+        except Exception:
+            logger.exception("AI pipeline: failed cleaning chunk %d/%d", idx + 1, len(chunks))
+            raise
+    cleaned = "\n\n".join([c.strip() for c in cleaned_chunks if c and c.strip()]).strip()
+    logger.debug("AI pipeline: cleaned_len=%d", len(cleaned))
+
+    summarize_chunk_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
 The provided text is a transcription of a conversation.
-Your task is to clean it up fixing indentation, punctuation and misspelled words.
-Make sure to include the speaker names and their respective statements.
-Don't write any preamble or conclusion.
-Write the Output in the same language as the Input text provided.
-        """),
-        ("human", """
-# Input:
+Summarize this chunk concisely.
+- Do NOT change speaker labels.
+- Capture main points and important details.
+- No opinions.
+- Keep speaker names or labels if present.
+- Same language as input.
+- Do NOT add explanations, comments, or preambles.
+- Output ONLY the summary.
+                """.strip(),
+            ),
+            (
+                "human",
+                """
+# Input chunk:
 {text}
 
 # Output:
