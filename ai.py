@@ -12,8 +12,8 @@ logger = logging.getLogger("ai")
 
 def _split_big(text: str):
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=12000,
-        chunk_overlap=500,
+        chunk_size=400000,
+        chunk_overlap=0,
         separators=["\n\n", "\n", ". ", "? ", "! ", " ", ""],
     )
     chunks = [c.strip() for c in splitter.split_text(text or "")]
@@ -43,11 +43,11 @@ def generate_clean_summary_sentiment(text: str):
 
     started_at = time.monotonic()
     input_len = len(text or "")
-    logger.info("AI pipeline start (input_len=%d)", input_len)
+    logger.debug("AI pipeline start (input_len=%d)", input_len)
 
     chunks = _split_big(text)
     if not chunks:
-        logger.info("AI pipeline: empty input")
+        logger.warning("AI pipeline: empty input")
         return "", "", None
 
     logger.debug(
@@ -76,13 +76,14 @@ Task:
 - Preserve punctuation when possible; add minimal punctuation only if required for readability.
 - Do NOT add explanations, comments, or preambles.
 - Output ONLY the cleaned transcription.
+- Fix transcription errors only for misunderstood words that are obvious from context.
 
 ### Example 1
 
 Input:
 Channel 0: Ciao
 Channel 1: Ciao
-Channel 0: come
+Channel 0: some
 Channel 1: tutto bene?
 Channel 0: stai?
 Channel 1: Io assonnato
@@ -106,7 +107,7 @@ Bob: go on
 Alice: saying
 Bob: okay
 Alice: that the system
-Bob: sounds good
+Bob: sounds boob
 Alice: is ready
 
 Output:
@@ -120,7 +121,7 @@ Mario Rossi: Non
 Maria Bianchi: Sì?
 Mario Rossi: ho
 Maria Bianchi: dimmi
-Mario Rossi: capito
+Mario Rossi: carpito
 Maria Bianchi: pure
 Mario Rossi: niente
 
@@ -202,6 +203,8 @@ You are given bullet summaries of chunks of a conversation.
 Merge them into a single concise summary.
 - Keep bullet points.
 - Keep speaker names if present.
+- Maintain factual accuracy.
+- Make sure every important point from the chunks is included.
 - Same language as the summaries.
 No preamble or conclusion.
                 """.strip(),
