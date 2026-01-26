@@ -99,6 +99,7 @@ def _ensure_schema() -> None:
                     cleaned_transcription TEXT,
                     summary TEXT,
                     sentiment SMALLINT CHECK (sentiment BETWEEN 0 AND 10),
+                    deleted_at TIMESTAMPTZ NULL,
                     CONSTRAINT transcripts_state_check CHECK (state IN ('progress', 'failed', 'summarizing', 'done')),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
