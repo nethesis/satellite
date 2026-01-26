@@ -52,6 +52,13 @@ MQTT_TOPIC_PREFIX=satellite
 # Deepgram API Key
 DEEPGRAM_API_KEY=your_deepgram_api_key
 
+# REST API (optional)
+HTTP_PORT=8000
+
+# REST API Authentication (optional)
+# When set, all /api/* endpoints require an auth header.
+API_TOKEN=your_static_api_token
+
 # OpenAI API Key (optional)
 OPENAI_API_KEY=your_openai_api_key
 
@@ -90,6 +97,7 @@ PGVECTOR_DATABASE=satellite
 
 #### Rest API Configuration
 - `HTTP_PORT`: Port for the HTTP server (default: 8000)
+- `API_TOKEN`: Optional static token for `/api/*` endpoints. If unset/empty, auth is disabled.
 
 #### Postgres Vectorstore Configuration
 If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` can persist the raw transcription to Postgres when the request includes `persist=true` and a valid `uniqueid`.
@@ -134,11 +142,16 @@ Deepgram parameters:
 Example:
 ```
 curl -X POST http://127.0.0.1:8000/api/get_transcription \
+    -H 'Authorization: Bearer YOUR_TOKEN' \
     -F uniqueid=1234567890.1234 \
     -F persist=true \
     -F summary=true \
     -F file=@call.wav;type=audio/wav
 ```
+
+Authentication:
+- If `API_TOKEN` is set, all `/api/*` endpoints require `Authorization: Bearer <token>` (or `X-API-Token: <token>`).
+- If `API_TOKEN` is unset/empty, auth is disabled (backwards compatible default).
 
 If `persist=true` and `PGVECTOR_*` is configured, the raw transcription is saved to Postgres.
 If `summary=true` and `OPENAI_API_KEY` is set, the service also generates a cleaned transcription, summary, and sentiment score (0-10) via a per-request subprocess worker (`call_processor.py`) and stores them in Postgres.
