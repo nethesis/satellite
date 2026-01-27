@@ -159,7 +159,26 @@ class AsteriskBridge:
                 snoop_channel_id = snoop_data['id']
                 self.channels[channel_id][f'snoop_channel_{direction}'] = snoop_channel_id
                 logger.debug(f"Snoop channel {snoop_channel_id} created")
-
+            try:
+                # Get connected info using ARI
+                channel_info = await self._ari_request(
+                    'GET',
+                    f"/channels/{channel_id}/variable",
+                    params={'variable': 'CALLERIDNUMINTERNAL'}
+                )
+                if channel_info and 'value' in channel_info and channel_info['value'] != '':
+                    self.channels[channel_id]['connected_number'] = channel_info['value']
+                    logger.debug(f"Updated connected number for channel {channel_id}: {channel_info['value']}")
+                channel_info = await self._ari_request(
+                    'GET',
+                    f"/channels/{channel_id}/variable",
+                    params={'variable': 'CALLERIDNAMEINTERNAL'}
+                )
+                if channel_info and 'value' in channel_info and channel_info['value'] != '':
+                    self.channels[channel_id]['connected_name'] = channel_info['value']
+                    logger.debug(f"Updated connected name for channel {channel_id}: {channel_info['value']}")
+            except Exception as e:
+                logger.debug(f"connected info not updated for channel {channel_id}: {e}")
         if channel_id.startswith("snoop-"):
             # Snoop channel entered Stasis, create an external media channel for it
             snoop_channel_id = channel_id
