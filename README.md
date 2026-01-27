@@ -159,6 +159,34 @@ If `OPENAI_API_KEY` is missing (or `persist=false`), clean/summary/sentiment are
 
 When `persist=true`, `POST /api/get_transcription` updates `transcripts.state` as it runs: `progress` → (`summarizing` →) `done`, or `failed` on errors.
 
+#### `POST /api/get_speech`
+
+Accepts text input and returns a Deepgram text-to-speech (TTS) MP3 stream.
+
+Request requirements:
+- Provide `text` (or `input`) as either query string parameters or as form fields (`application/x-www-form-urlencoded` or multipart form)
+
+Deepgram TTS parameters:
+- `model`: Deepgram TTS voice model. See [Deepgram TTS docs](https://developers.deepgram.com/docs/tts-models) for available models. Note that language is inferred from the model, choose a model that matches your text language.
+
+- These are passed through to Deepgram `/v1/speak` when provided. See [Deepgram TTS docs](https://developers.deepgram.com/reference/text-to-speech/speak-request): `encoding`, `container`, `sample_rate`, `bit_rate`, `mip_opt_out`, `tag`, `callback`, `callback_method`
+
+Response:
+- `Content-Type: audio/mpeg`
+- `Content-Disposition: attachment; filename="speech-<uuid>.mp3"`
+
+Example:
+```
+curl -X POST http://127.0.0.1:8000/api/get_speech \
+    -H 'Authorization: Bearer YOUR_TOKEN' \
+    -d 'text=Hello from Satellite' \
+    --output speech.mp3
+```
+
+Notes:
+- Text is split into 2000-character chunks (Deepgram input limit) and each chunk is synthesized sequentially; the resulting MP3 parts are concatenated.
+- Errors: `400` for missing text, `401` if `API_TOKEN` is set and auth is missing/invalid, `504` on Deepgram timeout, `502` if Deepgram is unreachable.
+
 ## Architecture
 
 Satellite consists of several key components:
