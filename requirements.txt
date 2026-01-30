@@ -1,6 +1,6 @@
 aiohttp
 aiomqtt
-deepgram-sdk==3.*
+deepgram-sdk==5.*
 fastapi
 langchain
 langchain_openai
