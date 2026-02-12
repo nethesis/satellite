@@ -278,7 +278,7 @@ class AsteriskBridge:
                     asyncio.create_task(self._start_connector(original_channel_id))
                 except Exception as e:
                     logger.error(f"Failed to start connector for channel {original_channel_id}: {e}")
-                    self.close_channel(original_channel_id)
+                    await self.close_channel(original_channel_id)
                 # Return control of original channel to dialplan
                 await self._ari_request(
                     'POST',
