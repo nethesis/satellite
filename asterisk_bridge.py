@@ -378,12 +378,12 @@ class AsteriskBridge:
             return
         original_channel_id = None
         for id, values in self.channels.items():
-            if values.get('snoop_channel') == channel_id:
+            if values.get('snoop_channel_in') == channel_id or values.get('snoop_channel_out') == channel_id:
                 # Snoop channel hangup
                 logger.debug(f"Snoop channel {channel_id} hangup")
                 original_channel_id = id
                 break
-            if values.get('external_media_channel') == channel_id:
+            if values.get('external_media_channel_in') == channel_id or values.get('external_media_channel_out') == channel_id:
                 # External media channel hangup
                 logger.debug(f"External media channel {channel_id} hangup")
                 original_channel_id = id
