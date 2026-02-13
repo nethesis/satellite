@@ -15,6 +15,7 @@ COPY requirements.txt /tmp/requirements.txt
 # Copy application files
 COPY *.py /tmp/
 COPY README.md /tmp/
+COPY transcription /tmp/transcription
 
 # Install dependencies
 RUN pip install --no-cache-dir --no-warn-script-location --user -r /tmp/requirements.txt
@@ -36,6 +37,7 @@ COPY --from=builder /root/.local /root/.local
 # Copy application files
 COPY --from=builder /tmp/*.py /app/
 COPY --from=builder /tmp/README.md /app/
+COPY --from=builder /tmp/transcription /app/transcription
 
 # Make sure scripts in .local are usable
 ENV PATH=/root/.local/bin:$PATH
