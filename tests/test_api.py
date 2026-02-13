@@ -66,9 +66,12 @@ class TestGetTranscription:
 
         assert response.status_code == 401
 
-    @patch('httpx.AsyncClient')
-    def test_auth_enabled_valid_token_allows_request(self, mock_client_class, client, valid_wav_content):
+    @patch('transcription.deepgram.httpx.AsyncClient')
+    @patch('api.get_provider')
+    def test_auth_enabled_valid_token_allows_request(self, mock_get_provider, mock_client_class, client, valid_wav_content, monkeypatch):
         """When API_TOKEN is set, /api endpoints require a matching token."""
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test_key")
+        
         # Mock the Deepgram API response
         mock_response = Mock()
         mock_response.json.return_value = {
@@ -78,12 +81,16 @@ class TestGetTranscription:
                     {
                         "alternatives": [
                             {"transcript": "Hello world"}
-                        ]
+                        ],
+                        "detected_language": "en"
                     }
                 ]
             }
         }
         mock_response.raise_for_status = Mock()
+        mock_response.status_code = 200
+        mock_response.text = "mock"
+        mock_response.headers.get.return_value = "application/json"
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
@@ -91,7 +98,11 @@ class TestGetTranscription:
         mock_client.__aexit__ = AsyncMock()
         mock_client_class.return_value = mock_client
 
-        with patch.dict(os.environ, {"API_TOKEN": "secret"}):
+        # Use actual provider
+        from transcription import get_provider as real_get_provider
+        mock_get_provider.side_effect = real_get_provider
+
+        with patch.dict(os.environ, {"API_TOKEN": "secret", "DEEPGRAM_API_KEY": "test_key"}):
             response = client.post(
                 "/api/get_transcription",
                 headers={"Authorization": "Bearer secret"},
@@ -119,9 +130,12 @@ class TestGetTranscription:
         assert response.status_code == 400
         assert "uniqueid" in response.json()["detail"]
 
-    @patch('httpx.AsyncClient')
-    def test_valid_wav_file(self, mock_client_class, client, valid_wav_content):
+    @patch('transcription.deepgram.httpx.AsyncClient')
+    @patch('api.get_provider')
+    def test_valid_wav_file(self, mock_get_provider, mock_client_class, client, valid_wav_content, monkeypatch):
         """Test transcription with a valid WAV file."""
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test_key")
+        
         # Mock the Deepgram API response
         mock_response = Mock()
         mock_response.json.return_value = {
@@ -131,18 +145,26 @@ class TestGetTranscription:
                     {
                         "alternatives": [
                             {"transcript": "Hello world"}
-                        ]
+                        ],
+                        "detected_language": "en"
                     }
                 ]
             }
         }
         mock_response.raise_for_status = Mock()
+        mock_response.status_code = 200
+        mock_response.text = "mock"
+        mock_response.headers.get.return_value = "application/json"
         
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock()
         mock_client_class.return_value = mock_client
+
+        # Use actual provider
+        from transcription import get_provider as real_get_provider
+        mock_get_provider.side_effect = real_get_provider
 
         # Make the request
         response = client.post(
@@ -157,9 +179,11 @@ class TestGetTranscription:
         assert "transcript" in data
         assert data["transcript"] == "SPEAKER 1: Hello world"
 
-    @patch('httpx.AsyncClient')
-    def test_persists_raw_transcript_via_threadpool(self, mock_client_class, client, valid_wav_content):
+    @patch('transcription.deepgram.httpx.AsyncClient')
+    @patch('api.get_provider')
+    def test_persists_raw_transcript_via_threadpool(self, mock_get_provider, mock_client_class, client, valid_wav_content, monkeypatch):
         """Ensure persistence path uses threadpool helper and forwards kwargs to db layer."""
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test_key")
 
         # Mock the Deepgram API response
         mock_response = Mock()
@@ -170,12 +194,16 @@ class TestGetTranscription:
                     {
                         "alternatives": [
                             {"transcript": "Hello world"}
-                        ]
+                        ],
+                        "detected_language": "en"
                     }
                 ]
             }
         }
         mock_response.raise_for_status = Mock()
+        mock_response.status_code = 200
+        mock_response.text = "mock"
+        mock_response.headers.get.return_value = "application/json"
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
@@ -183,10 +211,14 @@ class TestGetTranscription:
         mock_client.__aexit__ = AsyncMock()
         mock_client_class.return_value = mock_client
 
+        # Use actual provider
+        from transcription import get_provider as real_get_provider
+        mock_get_provider.side_effect = real_get_provider
+
         async def fake_run_in_threadpool(func, *args, **kwargs):
             return func(*args, **kwargs)
 
-        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "", "DEEPGRAM_API_KEY": "test_key"}), \
              patch("api.db.is_configured", return_value=True), \
              patch("api.db.upsert_transcript_progress", return_value=123) as progress_mock, \
              patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
@@ -217,9 +249,12 @@ class TestGetTranscription:
         assert response.status_code == 400
         assert "Invalid file type" in response.json()["detail"]
 
-    @patch('httpx.AsyncClient')
-    def test_deepgram_api_error(self, mock_client_class, client, valid_wav_content):
+    @patch('transcription.deepgram.httpx.AsyncClient')
+    @patch('api.get_provider')
+    def test_deepgram_api_error(self, mock_get_provider, mock_client_class, client, valid_wav_content, monkeypatch):
         """Test handling of Deepgram API errors."""
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test_key")
+        
         # Mock an HTTP error from Deepgram
         mock_response = Mock()
         mock_response.status_code = 401
@@ -237,6 +272,10 @@ class TestGetTranscription:
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client_class.return_value = mock_client
 
+        # Use actual provider
+        from transcription import get_provider as real_get_provider
+        mock_get_provider.side_effect = real_get_provider
+
         response = client.post(
             "/api/get_transcription",
             files={"file": ("test.wav", valid_wav_content, "audio/wav")},
@@ -244,11 +283,14 @@ class TestGetTranscription:
         )
 
         assert response.status_code == 401
-        assert "Deepgram API error" in response.json()["detail"]
+        assert "API error" in response.json()["detail"]
 
-    @patch('httpx.AsyncClient')
-    def test_deepgram_timeout_returns_504(self, mock_client_class, client, valid_wav_content):
+    @patch('transcription.deepgram.httpx.AsyncClient')
+    @patch('api.get_provider')
+    def test_deepgram_timeout_returns_504(self, mock_get_provider, mock_client_class, client, valid_wav_content, monkeypatch):
         """Test that Deepgram timeouts are mapped to 504 Gateway Timeout."""
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test_key")
+        
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
             side_effect=httpx.ReadTimeout("Timed out", request=Mock())
@@ -256,6 +298,10 @@ class TestGetTranscription:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client_class.return_value = mock_client
+
+        # Use actual provider
+        from transcription import get_provider as real_get_provider
+        mock_get_provider.side_effect = real_get_provider
 
         response = client.post(
             "/api/get_transcription",
@@ -266,19 +312,29 @@ class TestGetTranscription:
         assert response.status_code == 504
         assert "timed out" in response.json()["detail"].lower()
 
-    @patch('httpx.AsyncClient')
-    def test_malformed_deepgram_response(self, mock_client_class, client, valid_wav_content):
+    @patch('transcription.deepgram.httpx.AsyncClient')
+    @patch('api.get_provider')
+    def test_malformed_deepgram_response(self, mock_get_provider, mock_client_class, client, valid_wav_content, monkeypatch):
         """Test handling of malformed responses from Deepgram."""
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test_key")
+        
         # Mock a response with missing fields
         mock_response = Mock()
         mock_response.json.return_value = {"results": {}}
         mock_response.raise_for_status = Mock()
+        mock_response.status_code = 200
+        mock_response.text = "bad response"
+        mock_response.headers.get.return_value = "application/json"
         
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock()
         mock_client_class.return_value = mock_client
+
+        # Use actual provider
+        from transcription import get_provider as real_get_provider
+        mock_get_provider.side_effect = real_get_provider
 
         response = client.post(
             "/api/get_transcription",
@@ -289,9 +345,12 @@ class TestGetTranscription:
         assert response.status_code == 500
         assert "Failed to parse transcription response" in response.json()["detail"]
 
-    @patch('httpx.AsyncClient')
-    def test_missing_paragraphs_transcript_is_error(self, mock_client_class, client, valid_wav_content):
+    @patch('transcription.deepgram.httpx.AsyncClient')
+    @patch('api.get_provider')
+    def test_missing_paragraphs_transcript_is_error(self, mock_get_provider, mock_client_class, client, valid_wav_content, monkeypatch):
         """Diarized-only: missing paragraphs transcript returns 500."""
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test_key")
+        
         # Mock response without paragraphs transcript
         mock_response = Mock()
         mock_response.json.return_value = {
@@ -306,12 +365,19 @@ class TestGetTranscription:
             }
         }
         mock_response.raise_for_status = Mock()
+        mock_response.status_code = 200
+        mock_response.text = "bad"
+        mock_response.headers.get.return_value = "application/json"
         
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock()
         mock_client_class.return_value = mock_client
+
+        # Use actual provider
+        from transcription import get_provider as real_get_provider
+        mock_get_provider.side_effect = real_get_provider
 
         response = client.post(
             "/api/get_transcription",
