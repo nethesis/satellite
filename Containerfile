@@ -55,7 +55,9 @@ ENV ASTERISK_URL="http://127.0.0.1:8088" \
     MQTT_USERNAME="satellite" \
     SATELLITE_MQTT_PASSWORD="dummypassword" \
     HTTP_PORT="8000" \
+    TRANSCRIPTION_PROVIDER="deepgram" \
     DEEPGRAM_API_KEY="" \
+    MISTRAL_API_KEY="" \
     LOG_LEVEL="INFO" \
     PYTHONUNBUFFERED="1"
 
