@@ -1,11 +1,16 @@
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
+import re
+import uuid
 import json
 import httpx
 import os
 import logging
 import subprocess
 import sys
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 
 import db
 
@@ -13,6 +18,10 @@ app = FastAPI()
 logger = logging.getLogger("api")
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")  # Ensure this environment variable is set
+
+def _iter_bytes(data: bytes, *, chunk_size: int):
+    for i in range(0, len(data), chunk_size):
+        yield data[i : i + chunk_size]
 
 
 def _require_api_token_if_configured(request: Request) -> None:
@@ -82,6 +91,138 @@ def _get_deepgram_timeout_seconds() -> float:
     except ValueError:
         logger.warning("Invalid DEEPGRAM_TIMEOUT_SECONDS=%r; defaulting to 300", raw)
         return 300.0
+
+
+@api_router.post("/get_speech")
+async def get_speech(request: Request):
+    # Collect parameters from query string and multipart/x-www-form-urlencoded form fields
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
+
+    form_params = {}
+    if hasattr(form, "items"):
+        for k, v in form.items():
+            form_params[k] = v if isinstance(v, str) else str(v)
+
+    input_params = {**dict(request.query_params), **form_params}
+    logger.debug("Params: %s", input_params)
+
+    text = (input_params.get("text") or input_params.get("input") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing required field: text")
+
+    # use lanchain text splitter to split text into smaller chunks
+    # Deepgram TTS can handle 2000 characters per request https://developers.deepgram.com/docs/text-to-speech#input-text-limit
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=2000,
+        chunk_overlap=0,
+        separators=["\n\n", "\n", ".", "?", "!", " ", ""],
+    )
+    chunks = [c.strip() for c in splitter.split_text(text or "")]
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Text is empty")
+
+    # https://developers.deepgram.com/reference/text-to-speech/speak-request
+    deepgram_params = {
+        "callback": "",
+        "callback_method": "",
+        "mip_opt_out": "false",
+        "tag": "",
+        "bit_rate": "",
+        "container": "",
+        "encoding": "mp3",
+        "model": "",
+        "sample_rate": ""
+    }
+
+    params: dict[str, str] = {}
+    for k, v in deepgram_params.items():
+        if k in input_params and str(input_params[k]).strip():
+            params[k] = str(input_params[k]).strip()
+        elif str(v).strip():
+            params[k] = str(v).strip()
+
+        logger.debug("Deepgram TTS params: %s", params)
+
+    url = "https://api.deepgram.com/v1/speak"
+    headers = {
+        "Authorization": f"Token {DEEPGRAM_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg",
+    }
+
+    audio_parts: list[bytes] = []
+    try:
+        deepgram_timeout_seconds = _get_deepgram_timeout_seconds()
+        timeout = httpx.Timeout(
+            connect=10.0,
+            read=deepgram_timeout_seconds,
+            write=deepgram_timeout_seconds,
+            pool=10.0,
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for idx, chunk in enumerate(chunks, start=1):
+                response = await client.post(
+                    url,
+                    headers=headers,
+                    params=params,
+                    json={"text": chunk},
+                )
+                try:
+                    logger.debug(
+                        "Deepgram TTS response: chunk=%s/%s status=%s content_type=%s bytes=%s",
+                        idx,
+                        len(chunks),
+                        response.status_code,
+                        response.headers.get("Content-Type"),
+                        len(response.content or b""),
+                    )
+                except Exception:
+                    logger.debug("Failed to log Deepgram TTS response meta")
+                response.raise_for_status()
+                audio_parts.append(response.content)
+    except httpx.HTTPStatusError as e:
+        try:
+            status = e.response.status_code if e.response is not None else 502
+            body_preview = (
+                e.response.text[:500]
+                if e.response is not None and hasattr(e.response, "text") and e.response.text
+                else ""
+            )
+            logger.error("Deepgram TTS API error: status=%s body_preview=%s", status, body_preview)
+        except Exception:
+            logger.error("Deepgram TTS API error (logging failed)")
+        raise HTTPException(
+            status_code=e.response.status_code if e.response is not None else 502,
+            detail=f"Deepgram API error: {e.response.text if e.response is not None else ''}",
+        )
+    except httpx.TimeoutException:
+        logger.warning("Deepgram TTS request timed out")
+        raise HTTPException(status_code=504, detail="Deepgram request timed out")
+    except httpx.RequestError as e:
+        logger.error("Deepgram TTS request failed: %s", str(e))
+        raise HTTPException(status_code=502, detail="Failed to reach Deepgram")
+    except Exception as e:
+        logger.exception("Unexpected error while calling Deepgram TTS")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+    audio_bytes = b"".join(audio_parts)
+    if not audio_bytes:
+        raise HTTPException(status_code=500, detail="Deepgram returned empty audio")
+
+    filename = f"speech-{uuid.uuid4().hex}.mp3"
+    headers_out = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    return StreamingResponse(
+        _iter_bytes(audio_bytes, chunk_size=65536),
+        media_type="audio/mpeg",
+        headers=headers_out,
+    )
 
 @api_router.post('/get_transcription')
 async def get_transcription(

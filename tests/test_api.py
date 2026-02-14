@@ -322,3 +322,112 @@ class TestGetTranscription:
         assert response.status_code == 500
         assert "Failed to parse transcription response" in response.json()["detail"]
 
+
+class TestGetSpeech:
+    """Tests for the /api/get_speech endpoint."""
+
+    @patch("httpx.AsyncClient")
+    def test_get_speech_returns_mp3_and_filename(self, mock_client_class, client):
+        mock_response = Mock()
+        mock_response.content = b"MP3DATA"
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "audio/mpeg"}
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        response = client.post("/api/get_speech", data={"text": "hello"})
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("audio/mpeg")
+        assert response.content == b"MP3DATA"
+        assert "content-disposition" in response.headers
+        assert "speech-" in response.headers["content-disposition"]
+
+    @patch("httpx.AsyncClient")
+    def test_get_speech_splits_and_concatenates(self, mock_client_class, client):
+        resp1 = Mock()
+        resp1.content = b"AAA"
+        resp1.status_code = 200
+        resp1.headers = {"Content-Type": "audio/mpeg"}
+        resp1.raise_for_status = Mock()
+
+        resp2 = Mock()
+        resp2.content = b"BBB"
+        resp2.status_code = 200
+        resp2.headers = {"Content-Type": "audio/mpeg"}
+        resp2.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=[resp1, resp2])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        # api.py uses a fixed 2000-char chunk size; use a 2001-char input to force 2 requests.
+        response = client.post("/api/get_speech", data={"text": "a" * 2001})
+
+        assert response.status_code == 200
+        assert response.content == b"AAABBB"
+        assert mock_client.post.call_count == 2
+
+    @patch("httpx.AsyncClient")
+    def test_get_speech_ignores_unknown_params(self, mock_client_class, client):
+        mock_response = Mock()
+        mock_response.content = b"MP3DATA"
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "audio/mpeg"}
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        response = client.post("/api/get_speech?unknown_param=1", data={"text": "hello"})
+
+        assert response.status_code == 200
+
+        _, kwargs = mock_client.post.call_args
+        assert "params" in kwargs
+        assert "unknown_param" not in kwargs["params"]
+
+    def test_get_speech_missing_text_returns_400(self, client):
+        response = client.post("/api/get_speech", data={})
+        assert response.status_code == 400
+
+    @patch("httpx.AsyncClient")
+    def test_get_speech_deepgram_timeout_returns_504(self, mock_client_class, client):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ReadTimeout("Timed out", request=Mock()))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        response = client.post("/api/get_speech", data={"text": "hello"})
+        assert response.status_code == 504
+
+    @patch("httpx.AsyncClient")
+    def test_get_speech_deepgram_http_error_propagates_status(self, mock_client_class, client):
+        mock_response = Mock()
+        mock_response.status_code = 401
+        mock_response.text = "Invalid API key"
+
+        error = httpx.HTTPStatusError("Unauthorized", request=Mock(), response=mock_response)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_response.raise_for_status = Mock(side_effect=error)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        response = client.post("/api/get_speech", data={"text": "hello"})
+        assert response.status_code == 401
+        assert "Deepgram API error" in response.json()["detail"]
+
