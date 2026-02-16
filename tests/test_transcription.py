@@ -225,6 +225,47 @@ class TestVoxtralProvider:
         assert "Hi there" in result.raw_transcription
 
     @pytest.mark.asyncio
+    async def test_transcribe_diarization_enabled_by_default(self, monkeypatch):
+        """Test that VoxTral enables diarization by default (no params passed)."""
+        monkeypatch.setenv("MISTRAL_API_KEY", "test_key")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "mock"
+        mock_response.json.return_value = {
+            "text": "ignored",
+            "language": "en",
+            "segments": [
+                {"speaker": 0, "text": "First speaker says hello", "start": 0.0, "end": 2.0},
+                {"speaker": 1, "text": "Second speaker responds", "start": 2.5, "end": 4.0},
+            ]
+        }
+        mock_response.headers.get.return_value = "application/json"
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.post.return_value = mock_response
+
+        with patch("transcription.voxtral.httpx.AsyncClient", return_value=mock_client) as mock_http:
+            provider = VoxtralProvider()
+            result = await provider.transcribe(
+                audio_bytes=b"fake audio",
+                content_type="audio/wav",
+                params={}  # No params - diarization should be enabled by default
+            )
+
+        # Verify diarization was requested
+        call_args = mock_http.return_value.__aenter__.return_value.post.call_args
+        assert call_args[1]["data"]["diarize"] is True
+
+        # Should format with speaker labels by default
+        assert "Speaker 0:" in result.raw_transcription
+        assert "Speaker 1:" in result.raw_transcription
+        assert "First speaker says hello" in result.raw_transcription
+        assert "Second speaker responds" in result.raw_transcription
+
+    @pytest.mark.asyncio
     async def test_transcribe_empty_response(self, monkeypatch):
         """Test that VoxTral handles empty transcription (silence) gracefully."""
         monkeypatch.setenv("MISTRAL_API_KEY", "test_key")
