@@ -114,7 +114,7 @@ class VoxtralProvider(TranscriptionProvider):
         # If diarization is enabled and we have segments with speaker info,
         # reconstruct a speaker-labeled transcript
         segments = result.get("segments", [])
-        if segments and any("speaker" in seg for seg in segments):
+        if segments and any("speaker_id" in seg or "speaker" in seg for seg in segments):
             raw_transcription = self._format_diarized_transcript(segments)
 
         if not raw_transcription:
@@ -132,7 +132,9 @@ class VoxtralProvider(TranscriptionProvider):
         last_speaker = None
 
         for seg in segments:
-            speaker = seg.get("speaker")
+            # VoXtral uses "speaker_id" field (e.g., "speaker_1", "speaker_2")
+            # Fall back to "speaker" for backward compatibility with test mocks
+            speaker = seg.get("speaker_id") or seg.get("speaker")
             text = seg.get("text", "").strip()
 
             if not text:
@@ -141,7 +143,7 @@ class VoxtralProvider(TranscriptionProvider):
             # Add speaker label when speaker changes
             if speaker is not None and speaker != last_speaker:
                 # Format as "Speaker N:" to match common convention
-                lines.append(f"\nSpeaker {speaker}: {text}")
+                lines.append(f"\n{speaker}: {text}")
                 last_speaker = speaker
             else:
                 # Continue current speaker's text

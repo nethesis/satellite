@@ -198,9 +198,9 @@ class TestVoxtralProvider:
             "text": "ignored",
             "language": "en",
             "segments": [
-                {"speaker": 0, "text": "Hello", "start": 0.0, "end": 1.0},
-                {"speaker": 0, "text": "world", "start": 1.0, "end": 2.0},
-                {"speaker": 1, "text": "Hi there", "start": 2.0, "end": 3.0},
+                {"speaker_id": "speaker_1", "text": "Hello", "start": 0.0, "end": 1.0},
+                {"speaker_id": "speaker_1", "text": "world", "start": 1.0, "end": 2.0},
+                {"speaker_id": "speaker_2", "text": "Hi there", "start": 2.0, "end": 3.0},
             ]
         }
         mock_response.headers.get.return_value = "application/json"
@@ -219,8 +219,8 @@ class TestVoxtralProvider:
             )
 
         # Should format with speaker labels
-        assert "Speaker 0:" in result.raw_transcription
-        assert "Speaker 1:" in result.raw_transcription
+        assert "speaker_1:" in result.raw_transcription
+        assert "speaker_2:" in result.raw_transcription
         assert "Hello" in result.raw_transcription
         assert "Hi there" in result.raw_transcription
 
@@ -236,8 +236,8 @@ class TestVoxtralProvider:
             "text": "ignored",
             "language": "en",
             "segments": [
-                {"speaker": 0, "text": "First speaker says hello", "start": 0.0, "end": 2.0},
-                {"speaker": 1, "text": "Second speaker responds", "start": 2.5, "end": 4.0},
+                {"speaker_id": "speaker_1", "text": "First speaker says hello", "start": 0.0, "end": 2.0},
+                {"speaker_id": "speaker_2", "text": "Second speaker responds", "start": 2.5, "end": 4.0},
             ]
         }
         mock_response.headers.get.return_value = "application/json"
@@ -260,8 +260,8 @@ class TestVoxtralProvider:
         assert call_args[1]["data"]["diarize"] is True
 
         # Should format with speaker labels by default
-        assert "Speaker 0:" in result.raw_transcription
-        assert "Speaker 1:" in result.raw_transcription
+        assert "speaker_1:" in result.raw_transcription
+        assert "speaker_2:" in result.raw_transcription
         assert "First speaker says hello" in result.raw_transcription
         assert "Second speaker responds" in result.raw_transcription
 
