@@ -49,8 +49,15 @@ RTP_HEADER_SIZE=12
 MQTT_URL=mqtt://127.0.0.1:1883
 MQTT_TOPIC_PREFIX=satellite
 
-# Deepgram API Key
+# Transcription Provider (optional, default: deepgram)
+# Options: deepgram, voxtral
+TRANSCRIPTION_PROVIDER=deepgram
+
+# Deepgram API Key (required for Deepgram provider)
 DEEPGRAM_API_KEY=your_deepgram_api_key
+
+# Mistral API Key (required for VoxTral provider)
+MISTRAL_API_KEY=your_mistral_api_key
 
 # REST API (optional)
 HTTP_PORT=8000
@@ -92,8 +99,10 @@ PGVECTOR_DATABASE=satellite
 - `MQTT_URL`: URL of the MQTT broker
 - `MQTT_TOPIC_PREFIX`: Prefix for MQTT topics
 
-#### Deepgram Configuration
-- `DEEPGRAM_API_KEY`: Your Deepgram API key
+#### Transcription Configuration
+- `TRANSCRIPTION_PROVIDER`: Choose the transcription provider (`deepgram` or `voxtral`, default: `deepgram`)
+- `DEEPGRAM_API_KEY`: Your Deepgram API key (required for Deepgram provider)
+- `MISTRAL_API_KEY`: Your Mistral API key (required for VoxTral provider)
 
 #### Rest API Configuration
 - `HTTP_PORT`: Port for the HTTP server (default: 8000)
@@ -125,27 +134,37 @@ This requires the `vector` extension (pgvector) in your Postgres instance.
 
 #### `POST /api/get_transcription`
 
-Accepts a WAV upload and returns a Deepgram transcription.
+Accepts a WAV upload and returns a transcription from the configured provider (Deepgram or VoxTral).
 
 Request requirements:
 - Content type: multipart form upload with a `file` field (`audio/wav` or `audio/x-wav`)
 
 Optional fields (query string or multipart form fields):
+- `provider`: Override the transcription provider (`deepgram` or `voxtral`). If not set, uses `TRANSCRIPTION_PROVIDER` env var (default: `deepgram`)
 - `uniqueid`: Asterisk-style uniqueid like `1234567890.1234` (required only when `persist=true`)
 - `persist`: `true|false` (default `false`) — persist raw transcript to Postgres (requires `PGVECTOR_*` env vars)
 - `summary`: `true|false` (default `false`) — run AI enrichment (requires `OPENAI_API_KEY` and also `persist=true` so there is a DB record to update)
-- `channel0_name`, `channel1_name`: rename diarization labels in the returned transcript (replaces `Channel 0:` / `Channel 1:`)
+- `channel0_name`, `channel1_name`: rename diarization labels in the returned transcript (replaces `Channel 0:` / `Channel 1:` or `Speaker 0:` / `Speaker 1:`)
 
-Deepgram parameters:
-- Most Deepgram `/v1/listen` parameters may be provided as query/form fields and are passed through to Deepgram.
+Provider-specific parameters:
+- **Deepgram**: Most Deepgram `/v1/listen` parameters may be provided as query/form fields (e.g., `model`, `language`, `diarize`, `punctuate`)
+- **VoxTral**: Supports `model` (default: `voxtral-mini-latest`), `language`, `diarize`, `temperature`, `context_bias`, `timestamp_granularities`
 
 Example:
 ```
+# Using default provider (from TRANSCRIPTION_PROVIDER env var)
 curl -X POST http://127.0.0.1:8000/api/get_transcription \
     -H 'Authorization: Bearer YOUR_TOKEN' \
     -F uniqueid=1234567890.1234 \
     -F persist=true \
     -F summary=true \
+    -F file=@call.wav;type=audio/wav
+
+# Override provider to use VoxTral
+curl -X POST http://127.0.0.1:8000/api/get_transcription \
+    -H 'Authorization: Bearer YOUR_TOKEN' \
+    -F provider=voxtral \
+    -F diarize=true \
     -F file=@call.wav;type=audio/wav
 ```
 
