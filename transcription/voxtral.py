@@ -38,8 +38,9 @@ class VoxtralProvider(TranscriptionProvider):
         if "language" in params and params["language"].strip():
             data["language"] = params["language"]
 
-        diarize_enabled = "diarize" in params and params["diarize"].strip().lower() in ("true", "1", "yes")
-        if diarize_enabled:
+        # Enable diarization by default (for speaker labels), unless explicitly disabled
+        diarize_disabled = "diarize" in params and params["diarize"].strip().lower() in ("false", "0", "no")
+        if not diarize_disabled:
             data["diarize"] = True  # Boolean, not string
             # VoxTral requires timestamp_granularities when diarize is enabled
             if "timestamp_granularities" not in params or not params.get("timestamp_granularities", "").strip():
