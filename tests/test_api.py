@@ -326,6 +326,55 @@ class TestGetTranscription:
 class TestGetSpeech:
     """Tests for the /api/get_speech endpoint."""
 
+    @pytest.mark.skipif(
+        not (os.getenv("DEEPGRAM_API_KEY") or "").strip(),
+        reason="DEEPGRAM_API_KEY is not set or empty",
+    )
+    def test_get_speech_and_transcription_roundtrip_italian(self, client, tmp_path):
+        source_text = "questo è un test delle api"
+
+        tts_response = client.post(
+            "/api/get_speech",
+            data={
+                "text": source_text,
+                "encoding": "linear16",
+                "container": "wav",
+                "sample_rate": "16000",
+                "model": "aura-2-melia-it"
+            },
+        )
+
+        assert tts_response.status_code == 200
+        assert tts_response.content
+
+        audio_file = tmp_path / "tts_roundtrip.wav"
+        audio_file.write_bytes(tts_response.content)
+
+        with audio_file.open("rb") as audio_stream:
+            stt_response = client.post(
+                "/api/get_transcription",
+                files={"file": ("tts_roundtrip.wav", audio_stream, "audio/wav")},
+                data={"language": "it"},
+            )
+
+        assert stt_response.status_code == 200
+        transcript = stt_response.json().get("transcript", "")
+
+        def normalize(text: str) -> str:
+            return " ".join(
+                text.lower()
+                .replace(".", " ")
+                .replace(",", " ")
+                .replace("?", " ")
+                .replace("!", " ")
+                .replace(":", " ")
+                .replace(";", " ")
+                .replace("\n", " ")
+                .split()
+            )
+
+        assert normalize(transcript) == normalize(source_text)
+
     @patch("httpx.AsyncClient")
     def test_get_speech_returns_mp3_and_filename(self, mock_client_class, client):
         mock_response = Mock()
