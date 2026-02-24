@@ -167,7 +167,21 @@ Request requirements:
 - Provide `text` (or `input`) as either query string parameters or as form fields (`application/x-www-form-urlencoded` or multipart form)
 
 Deepgram TTS parameters:
-- `model`: Deepgram TTS voice model. See [Deepgram TTS docs](https://developers.deepgram.com/docs/tts-models) for available models. Note that language is inferred from the model, choose a model that matches your text language.
+- `model`: Deepgram TTS voice model. See [Deepgram TTS docs](https://developers.deepgram.com/docs/tts-models) for available models. Note that language is inferred from the model, choose a model that matches your text language. See all available languages/models [here](https://developers.deepgram.com/docs/tts-models).
+Italian voices:
+| Model | Name | Expressed Gender | Age | Language | Accent | Characteristics | Use Cases |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| aura-2-melia-it | melia | feminine | Adult | it-it | Italian | Clear, Comfortable, Engaging, Friendly, Natural | Casual Chat, Customer Service, Interview |
+| aura-2-elio-it | elio | masculine | Adult | it-it | Italian | Breathy, Calm, Professional, Smooth, Trustworthy | Interview, Casual Chat, Customer Service |
+| aura-2-flavio-it | flavio | masculine | Adult | it-it | Italian | Confident, Deep, Empathetic, Professional, Trustworthy | Casual Chat, Interview, Customer Service |
+| aura-2-maia-it | maia | feminine | Young Adult | it-it | Italian | Caring, Energetic, Expressive, Professional, Warm | Interview, Casual Chat, Customer Service |
+| aura-2-cinzia-it | cinzia | feminine | Mature | it-it | Italian | Approachable, Friendly, Smooth, Trustworthy, Warm | Customer Service, Interview, Narration |
+| aura-2-cesare-it | cesare | masculine | Adult | it-it | Italian | Clear, Empathetic, Knowledgeable, Natural, Smooth | Casual Chat, Customer Service, Interview, IVR |
+| aura-2-livia-it | livia | feminine | Adult | it-it | Italian | Approachable, Cheerful, Clear, Engaging, Expressive | Customer Service, Interview, Audiobook |
+| aura-2-perseo-it | perseo | masculine | Young Adult | it-it | Italian | Casual, Clear, Natural, Polite, Smooth | Casual Chat, Customer Service |
+| aura-2-dionisio-it | dionisio | masculine | Adult | it-it | Italian | Confident, Engaging, Friendly, Melodic, Positive | Interview, Casual Chat, Customer Service |
+| aura-2-demetra-it | demetra | feminine | Adult | it-it | Italian | Calm, Comfortable, Patient | Casual Chat, Interview, Narration |
+
 
 - These are passed through to Deepgram `/v1/speak` when provided. See [Deepgram TTS docs](https://developers.deepgram.com/reference/text-to-speech/speak-request): `encoding`, `container`, `sample_rate`, `bit_rate`, `mip_opt_out`, `tag`, `callback`, `callback_method`
 
