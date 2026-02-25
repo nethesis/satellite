@@ -166,6 +166,27 @@ Accepts text input and returns a Deepgram text-to-speech (TTS) MP3 stream.
 Request requirements:
 - Provide `text` (or `input`) as either query string parameters or as form fields (`application/x-www-form-urlencoded` or multipart form)
 
+Model selection:
+- `model` is optional when `language` is provided.
+- If `model` is missing and `language` is set, Satellite uses `GET /api/get_models?language=<language>` internally and picks the first model in the returned list.
+- If no model matches the requested language, the API returns `400`.
+
+#### `GET /api/get_models`
+
+Returns the available Deepgram TTS models known by Satellite.
+
+Parameters:
+- `language` (optional): filter models by suffix. Only models ending with `-<language>` are returned.
+
+Response `200`:
+- `{ "models": ["aura-2-melia-it", ...] }`
+
+Example:
+```
+curl -X GET 'http://127.0.0.1:8000/api/get_models?language=it' \
+    -H 'Authorization: Bearer YOUR_TOKEN'
+```
+
 Deepgram TTS parameters:
 - `model`: Deepgram TTS voice model. See [Deepgram TTS docs](https://developers.deepgram.com/docs/tts-models) for available models. Note that language is inferred from the model, choose a model that matches your text language. See all available languages/models [here](https://developers.deepgram.com/docs/tts-models).
 Italian voices:

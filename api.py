@@ -19,6 +19,112 @@ logger = logging.getLogger("api")
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")  # Ensure this environment variable is set
 
+DEEPGRAM_TTS_MODELS = [
+    "aura-2-agathe-fr",
+    "aura-2-agustina-es",
+    "aura-2-alvaro-es",
+    "aura-2-ama-ja",
+    "aura-2-amalthea-en",
+    "aura-2-andromeda-en",
+    "aura-2-antonia-es",
+    "aura-2-apollo-en",
+    "aura-2-aquila-es",
+    "aura-2-arcas-en",
+    "aura-2-aries-en",
+    "aura-2-asteria-en",
+    "aura-2-athena-en",
+    "aura-2-atlas-en",
+    "aura-2-aurelia-de",
+    "aura-2-aurora-en",
+    "aura-2-beatrix-nl",
+    "aura-2-callista-en",
+    "aura-2-carina-es",
+    "aura-2-celeste-es",
+    "aura-2-cesare-it",
+    "aura-2-cinzia-it",
+    "aura-2-cora-en",
+    "aura-2-cordelia-en",
+    "aura-2-cornelia-nl",
+    "aura-2-daphne-nl",
+    "aura-2-delia-en",
+    "aura-2-demetra-it",
+    "aura-2-diana-es",
+    "aura-2-dionisio-it",
+    "aura-2-draco-en",
+    "aura-2-ebisu-ja",
+    "aura-2-elara-de",
+    "aura-2-electra-en",
+    "aura-2-elio-it",
+    "aura-2-estrella-es",
+    "aura-2-fabian-de",
+    "aura-2-flavio-it",
+    "aura-2-fujin-ja",
+    "aura-2-gloria-es",
+    "aura-2-harmonia-en",
+    "aura-2-hector-fr",
+    "aura-2-helena-en",
+    "aura-2-hera-en",
+    "aura-2-hermes-en",
+    "aura-2-hestia-nl",
+    "aura-2-hyperion-en",
+    "aura-2-iris-en",
+    "aura-2-izanami-ja",
+    "aura-2-janus-en",
+    "aura-2-javier-es",
+    "aura-2-julius-de",
+    "aura-2-juno-en",
+    "aura-2-jupiter-en",
+    "aura-2-kara-de",
+    "aura-2-lara-de",
+    "aura-2-lars-nl",
+    "aura-2-leda-nl",
+    "aura-2-livia-it",
+    "aura-2-luciano-es",
+    "aura-2-luna-en",
+    "aura-2-maia-it",
+    "aura-2-mars-en",
+    "aura-2-melia-it",
+    "aura-2-minerva-en",
+    "aura-2-neptune-en",
+    "aura-2-nestor-es",
+    "aura-2-odysseus-en",
+    "aura-2-olivia-es",
+    "aura-2-ophelia-en",
+    "aura-2-orion-en",
+    "aura-2-orpheus-en",
+    "aura-2-pandora-en",
+    "aura-2-perseo-it",
+    "aura-2-phoebe-en",
+    "aura-2-pluto-en",
+    "aura-2-rhea-nl",
+    "aura-2-roman-nl",
+    "aura-2-sander-nl",
+    "aura-2-saturn-en",
+    "aura-2-selena-es",
+    "aura-2-selene-en",
+    "aura-2-silvia-es",
+    "aura-2-sirio-es",
+    "aura-2-thalia-en",
+    "aura-2-theia-en",
+    "aura-2-uzume-ja",
+    "aura-2-valerio-es",
+    "aura-2-vesta-en",
+    "aura-2-viktoria-de",
+    "aura-2-zeus-en",
+    "aura-angus-en",
+    "aura-arcas-en",
+    "aura-asteria-en",
+    "aura-athena-en",
+    "aura-helios-en",
+    "aura-hera-en",
+    "aura-luna-en",
+    "aura-orion-en",
+    "aura-orpheus-en",
+    "aura-perseus-en",
+    "aura-stella-en",
+    "aura-zeus-en",
+]
+
 def _iter_bytes(data: bytes, *, chunk_size: int):
     for i in range(0, len(data), chunk_size):
         yield data[i : i + chunk_size]
@@ -93,6 +199,20 @@ def _get_deepgram_timeout_seconds() -> float:
         return 300.0
 
 
+def get_models(language: str | None = None) -> list[str]:
+    models = DEEPGRAM_TTS_MODELS
+    normalized_language = (language or "").strip().lower()
+    if not normalized_language:
+        return models
+    language_suffix = f"-{normalized_language}"
+    return [model for model in models if model.lower().endswith(language_suffix)]
+
+
+@api_router.get("/get_models")
+async def get_models_endpoint(language: str | None = None):
+    return {"models": get_models(language)}
+
+
 @api_router.post("/get_speech")
 async def get_speech(request: Request):
     # Collect parameters from query string and multipart/x-www-form-urlencoded form fields
@@ -110,6 +230,7 @@ async def get_speech(request: Request):
     logger.debug("Params: %s", input_params)
 
     text = (input_params.get("text") or input_params.get("input") or "").strip()
+    language = (input_params.get("language") or "").strip().lower()
     if not text:
         raise HTTPException(status_code=400, detail="Missing required field: text")
 
@@ -144,7 +265,13 @@ async def get_speech(request: Request):
         elif str(v).strip():
             params[k] = str(v).strip()
 
-        logger.debug("Deepgram TTS params: %s", params)
+    if not params.get("model") and language:
+        models = get_models(language)
+        if not models:
+            raise HTTPException(status_code=400, detail=f"No TTS model available for language: {language}")
+        params["model"] = models[0]
+
+    logger.debug("Deepgram TTS params: %s", params)
 
     url = "https://api.deepgram.com/v1/speak"
     headers = {

@@ -326,6 +326,35 @@ class TestGetTranscription:
 class TestGetSpeech:
     """Tests for the /api/get_speech endpoint."""
 
+    def test_get_models_returns_all_models(self, client):
+        response = client.get("/api/get_models")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "models" in data
+        assert isinstance(data["models"], list)
+        assert "aura-2-melia-it" in data["models"]
+
+    def test_get_models_filters_by_language_suffix(self, client):
+        response = client.get("/api/get_models", params={"language": "it"})
+
+        assert response.status_code == 200
+        models = response.json()["models"]
+        assert models
+        assert all(model.endswith("-it") for model in models)
+
+    def test_get_models_auth_enabled_requires_token(self, client):
+        with patch.dict(os.environ, {"API_TOKEN": "secret"}):
+            response = client.get("/api/get_models")
+
+        assert response.status_code == 401
+
+    def test_get_models_auth_enabled_valid_token(self, client):
+        with patch.dict(os.environ, {"API_TOKEN": "secret"}):
+            response = client.get("/api/get_models", headers={"Authorization": "Bearer secret"})
+
+        assert response.status_code == 200
+
     @pytest.mark.skipif(
         not (os.getenv("DEEPGRAM_API_KEY") or "").strip(),
         reason="DEEPGRAM_API_KEY is not set or empty",
@@ -445,6 +474,57 @@ class TestGetSpeech:
         _, kwargs = mock_client.post.call_args
         assert "params" in kwargs
         assert "unknown_param" not in kwargs["params"]
+
+    @patch("httpx.AsyncClient")
+    def test_get_speech_uses_first_language_model_if_missing_model(self, mock_client_class, client):
+        from api import get_models
+
+        mock_response = Mock()
+        mock_response.content = b"MP3DATA"
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "audio/mpeg"}
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        response = client.post("/api/get_speech", data={"text": "hello", "language": "it"})
+
+        assert response.status_code == 200
+        _, kwargs = mock_client.post.call_args
+        assert kwargs["params"]["model"] == get_models("it")[0]
+
+    @patch("httpx.AsyncClient")
+    def test_get_speech_explicit_model_takes_precedence_over_language(self, mock_client_class, client):
+        mock_response = Mock()
+        mock_response.content = b"MP3DATA"
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "audio/mpeg"}
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        response = client.post(
+            "/api/get_speech",
+            data={"text": "hello", "language": "it", "model": "aura-2-elio-it"},
+        )
+
+        assert response.status_code == 200
+        _, kwargs = mock_client.post.call_args
+        assert kwargs["params"]["model"] == "aura-2-elio-it"
+
+    def test_get_speech_language_without_available_model_returns_400(self, client):
+        response = client.post("/api/get_speech", data={"text": "hello", "language": "zz"})
+
+        assert response.status_code == 400
+        assert "No TTS model available for language" in response.json()["detail"]
 
     def test_get_speech_missing_text_returns_400(self, client):
         response = client.post("/api/get_speech", data={})
