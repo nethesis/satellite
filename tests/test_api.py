@@ -366,8 +366,6 @@ class TestGetSpeech:
             "/api/get_speech",
             data={
                 "text": source_text,
-                "encoding": "linear16",
-                "container": "wav",
                 "sample_rate": "16000",
                 "model": "aura-2-melia-it"
             },
@@ -376,13 +374,13 @@ class TestGetSpeech:
         assert tts_response.status_code == 200
         assert tts_response.content
 
-        audio_file = tmp_path / "tts_roundtrip.wav"
+        audio_file = tmp_path / "tts_roundtrip.mp3"
         audio_file.write_bytes(tts_response.content)
 
         with audio_file.open("rb") as audio_stream:
             stt_response = client.post(
                 "/api/get_transcription",
-                files={"file": ("tts_roundtrip.wav", audio_stream, "audio/wav")},
+                files={"file": ("tts_roundtrip.mp3", audio_stream, "audio/mpeg")},
                 data={"language": "it"},
             )
 
@@ -526,6 +524,37 @@ class TestGetSpeech:
         assert response.status_code == 400
         assert "No TTS model available for language" in response.json()["detail"]
 
+    def test_get_speech_rejects_non_mp3_encoding(self, client):
+        response = client.post("/api/get_speech", data={"text": "hello", "encoding": "linear16"})
+        assert response.status_code == 400
+        assert "Only MP3 output is supported" in response.json()["detail"]
+
+    def test_get_speech_rejects_non_mp3_container(self, client):
+        response = client.post("/api/get_speech", data={"text": "hello", "container": "wav"})
+        assert response.status_code == 400
+        assert "Only MP3 output is supported" in response.json()["detail"]
+
+    @patch("httpx.AsyncClient")
+    def test_get_speech_ignores_container_mp3_for_deepgram(self, mock_client_class, client):
+        mock_response = Mock()
+        mock_response.content = b"MP3DATA"
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "audio/mpeg"}
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        response = client.post("/api/get_speech", data={"text": "hello", "container": "mp3"})
+
+        assert response.status_code == 200
+        _, kwargs = mock_client.post.call_args
+        assert kwargs["params"]["encoding"] == "mp3"
+        assert "container" not in kwargs["params"]
+
     def test_get_speech_missing_text_returns_400(self, client):
         response = client.post("/api/get_speech", data={})
         assert response.status_code == 400
@@ -559,4 +588,3 @@ class TestGetSpeech:
         response = client.post("/api/get_speech", data={"text": "hello"})
         assert response.status_code == 401
         assert "Deepgram API error" in response.json()["detail"]
-

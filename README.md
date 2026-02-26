@@ -189,6 +189,7 @@ curl -X GET 'http://127.0.0.1:8000/api/get_models?language=it' \
 
 Deepgram TTS parameters:
 - `model`: Deepgram TTS voice model. See [Deepgram TTS docs](https://developers.deepgram.com/docs/tts-models) for available models. Note that language is inferred from the model, choose a model that matches your text language. See all available languages/models [here](https://developers.deepgram.com/docs/tts-models).
+- Output is MP3-only. Requests with non-MP3 `encoding` or `container` return `400`.
 
 Italian Voices:
 
@@ -206,7 +207,8 @@ Italian Voices:
 | aura-2-demetra-it | demetra | feminine | Adult | it-it | Italian | Calm, Comfortable, Patient | Casual Chat, Interview, Narration |
 
 
-- These are passed through to Deepgram `/v1/speak` when provided. See [Deepgram TTS docs](https://developers.deepgram.com/reference/text-to-speech/speak-request): `encoding`, `container`, `sample_rate`, `bit_rate`, `mip_opt_out`, `tag`, `callback`, `callback_method`
+- These are passed through to Deepgram `/v1/speak` when provided: `sample_rate`, `bit_rate`, `mip_opt_out`, `tag`, `callback`, `callback_method`.
+- `encoding` is forced to `mp3`; `container` must be omitted (if set to `mp3`, it is ignored).
 
 Response:
 - `Content-Type: audio/mpeg`
