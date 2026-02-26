@@ -5,6 +5,7 @@ connect rtp stream with deepgram retrieving transcriptions and publishing it to 
 import asyncio
 import json
 import logging
+import time
 import numpy as np
 from deepgram import (
     DeepgramClient,
@@ -52,8 +53,22 @@ class DeepgramConnector:
         self.complete_call = []
         self._close_started = False
         self._close_lock = asyncio.Lock()
+        self._first_transcript_logged = False
+        self.call_elapsed_at_start_override = kwargs.get("call_elapsed_at_start")
+        self.call_start_epoch = kwargs.get("call_start_epoch")
+        self.call_elapsed_at_start = 0.0
+        self.transcription_start_monotonic = None
 
     async def start(self):
+        if isinstance(self.call_elapsed_at_start_override, (int, float)) and self.call_elapsed_at_start_override >= 0:
+            self.call_elapsed_at_start = float(self.call_elapsed_at_start_override)
+        elif isinstance(self.call_start_epoch, (int, float)) and self.call_start_epoch > 0:
+            self.call_elapsed_at_start = max(0.0, time.time() - float(self.call_start_epoch))
+            logger.info(
+                f"Transcription timing base for {self.uniqueid}: "
+                f"call_elapsed_at_start={self.call_elapsed_at_start:.3f}s"
+            )
+
         deepgram: DeepgramClient = DeepgramClient(self.deepgram_api_key)
         self.dg_connection = deepgram.listen.asyncwebsocket.v("1")
         self.dg_connection.on(LiveTranscriptionEvents.Transcript, self.on_message)
@@ -79,6 +94,7 @@ class DeepgramConnector:
             logger.error(f"Failed to start Deepgram connection for {self.uniqueid}")
             return
 
+        self.transcription_start_monotonic = time.monotonic()
         self.connected = True
         self.read_audio_from_rtp_task = asyncio.create_task(self.read_audio_from_rtp())
         self.send_audio_to_deepgram_task = asyncio.create_task(self.send_audio_to_deepgram())
@@ -91,7 +107,19 @@ class DeepgramConnector:
         transcription = result.channel.alternatives[0].transcript
         if len(transcription) == 0:
             return
-        timestamp = result.start
+        if not self._first_transcript_logged:
+            logger.info(
+                f"First Deepgram transcript for {self.uniqueid} "
+                f"(is_final={result.is_final}, len={len(transcription)})"
+            )
+            self._first_transcript_logged = True
+        # Use wall-clock elapsed since transcription start to avoid drift
+        # caused by buffered audio being processed faster/slower than realtime.
+        if self.transcription_start_monotonic is None:
+            stream_elapsed = float(result.start)
+        else:
+            stream_elapsed = max(0.0, time.monotonic() - self.transcription_start_monotonic)
+        timestamp = stream_elapsed + float(self.call_elapsed_at_start)
         if result.channel_index[0] == 0:
             speaker_name = self.speaker_name_in
             speaker_number = self.speaker_number_in
@@ -161,8 +189,9 @@ class DeepgramConnector:
         Read audio from RTP stream
         """
         try:
-            target_size = 5120
-            timeout = 0.25 # 250ms timeout
+            # Keep chunks relatively small to reduce latency to first transcript.
+            target_size = 1600
+            timeout = 0.10
             while self.connected:
                 # Read audio data from both streams till target size or timeout is reached
                 buffer_in = bytearray()
@@ -275,4 +304,3 @@ class DeepgramConnector:
                 "raw_transcription": text
             })
         )
-
