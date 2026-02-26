@@ -120,6 +120,8 @@ This requires the `vector` extension (pgvector) in your Postgres instance.
 2. Make sure your MQTT broker is running
 3. Run the application: `python main.py`
 4. Configure Asterisk dialplan to direct calls to the Stasis application named "satellite"
+5. Send an MQTT message to the topic `transcription/control` with payload `{"action":"start", "uniqueid":"[CALL_UNIQUEID]"}` or `{"action":"start", "linkedid":"[CALL_UNIQUEID]"}`
+6. Stop the trascription with MQTT message to the topic `transcription/control` with payload `{"action":"stop", "uniqueid":"[CALL_UNIQUEID]"}` or `{"action":"stop", "linkedid":"[CALL_UNIQUEID]"}`
 
 ### REST API
 
