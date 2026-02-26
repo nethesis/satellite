@@ -189,7 +189,9 @@ curl -X GET 'http://127.0.0.1:8000/api/get_models?language=it' \
 
 Deepgram TTS parameters:
 - `model`: Deepgram TTS voice model. See [Deepgram TTS docs](https://developers.deepgram.com/docs/tts-models) for available models. Note that language is inferred from the model, choose a model that matches your text language. See all available languages/models [here](https://developers.deepgram.com/docs/tts-models).
-Italian voices:
+
+Italian Voices:
+
 | Model | Name | Expressed Gender | Age | Language | Accent | Characteristics | Use Cases |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | aura-2-melia-it | melia | feminine | Adult | it-it | Italian | Clear, Comfortable, Engaging, Friendly, Natural | Casual Chat, Customer Service, Interview |
