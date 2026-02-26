@@ -234,6 +234,13 @@ async def get_speech(request: Request):
     if not text:
         raise HTTPException(status_code=400, detail="Missing required field: text")
 
+    requested_encoding = (input_params.get("encoding") or "").strip().lower()
+    requested_container = (input_params.get("container") or "").strip().lower()
+    if requested_encoding and requested_encoding != "mp3":
+        raise HTTPException(status_code=400, detail="Only MP3 output is supported (encoding=mp3)")
+    if requested_container and requested_container != "mp3":
+        raise HTTPException(status_code=400, detail="Only MP3 output is supported")
+
     # use lanchain text splitter to split text into smaller chunks
     # Deepgram TTS can handle 2000 characters per request https://developers.deepgram.com/docs/text-to-speech#input-text-limit
     splitter = RecursiveCharacterTextSplitter(
@@ -252,8 +259,6 @@ async def get_speech(request: Request):
         "mip_opt_out": "false",
         "tag": "",
         "bit_rate": "",
-        "container": "",
-        "encoding": "mp3",
         "model": "",
         "sample_rate": ""
     }
@@ -270,6 +275,7 @@ async def get_speech(request: Request):
         if not models:
             raise HTTPException(status_code=400, detail=f"No TTS model available for language: {language}")
         params["model"] = models[0]
+    params["encoding"] = "mp3"
 
     logger.debug("Deepgram TTS params: %s", params)
 
