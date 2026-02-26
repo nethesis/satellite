@@ -82,9 +82,26 @@ async def realtime_call_transcription():
         rtp_server=rtp_server
     )
 
+    async def handle_mqtt_control(topic, payload):
+        """Handle transcription control commands from middleware."""
+        if not isinstance(payload, dict):
+            return
+
+        action = payload.get("action")
+        call_id = payload.get("linkedid") or payload.get("uniqueid")
+        if not isinstance(action, str) or not isinstance(call_id, str) or not call_id:
+            return
+
+        if action == "start":
+            await asterisk_bridge.start_transcription(call_id)
+        elif action == "stop":
+            await asterisk_bridge.stop_transcription(call_id)
+
     # Start services
     logger.info("Starting services...")
+    mqtt_client.set_callback(handle_mqtt_control)
     await mqtt_client.connect()
+    await mqtt_client.subscribe("transcription/control")
     await asterisk_bridge.connect()
     logger.info("All services started")
 
@@ -110,4 +127,3 @@ if __name__ == "__main__":
     server_thread.start()
     # Run the realtime call transcription pipeline
     asyncio.run(realtime_call_transcription())
-
