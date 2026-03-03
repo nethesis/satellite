@@ -25,6 +25,7 @@ FROM python:slim
 # Install runtime dependencies for PyAudio
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libportaudio2 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

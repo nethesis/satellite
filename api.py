@@ -9,6 +9,10 @@ import os
 import logging
 import subprocess
 import sys
+import shutil
+import tempfile
+from deepgram import DeepgramClient, SpeakOptions
+from deepgram.clients.common.v1.errors import DeepgramApiError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
@@ -130,6 +134,67 @@ def _iter_bytes(data: bytes, *, chunk_size: int):
         yield data[i : i + chunk_size]
 
 
+def _concat_and_boost_mp3_ffmpeg_sync(chunks: list[bytes], gain: float) -> bytes:
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError("ffmpeg is not installed or not available in PATH")
+
+    with tempfile.TemporaryDirectory(prefix="satellite-tts-", delete=False) as temp_dir:
+        concat_file_path = os.path.join(temp_dir, "inputs.txt")
+        output_path = os.path.join(temp_dir, "output.mp3")
+
+        with open(concat_file_path, "w", encoding="utf-8") as concat_file:
+            for index, chunk in enumerate(chunks, start=1):
+                chunk_filename = f"chunk_{index:04d}.mp3"
+                chunk_path = os.path.join(temp_dir, chunk_filename)
+                with open(chunk_path, "wb") as chunk_file:
+                    chunk_file.write(chunk)
+                concat_file.write(f"file '{chunk_filename}'\n")
+
+        proc = subprocess.run(
+            [
+                ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                "inputs.txt",
+                "-filter:a",
+                f"volume={gain}",
+                "-y",
+                "output.mp3",
+            ],
+            cwd=temp_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        if proc.returncode != 0:
+            stderr_preview = (proc.stderr or b"")[:2000].decode("utf-8", errors="replace")
+            raise RuntimeError(f"ffmpeg failed rc={proc.returncode} stderr={stderr_preview!r}")
+
+        with open(output_path, "rb") as output_file:
+            return output_file.read()
+
+
+async def _concat_and_boost_mp3_ffmpeg(chunks: list[bytes], gain: float = 8.0) -> bytes:
+    return await run_in_threadpool(_concat_and_boost_mp3_ffmpeg_sync, chunks, gain)
+
+
+def _tts_chunk_to_bytes_sync(text: str, options: SpeakOptions) -> bytes:
+    """Synthesize a single text chunk via Deepgram SDK and return audio bytes."""
+    deepgram = DeepgramClient(DEEPGRAM_API_KEY)
+    response = deepgram.speak.rest.v("1").stream_memory(
+        {"text": text}, options
+    )
+    return response.stream_memory.read()
+
+
 def _require_api_token_if_configured(request: Request) -> None:
     configured_token = (os.getenv("API_TOKEN") or "").strip()
     if not configured_token:
@@ -190,14 +255,6 @@ def _run_call_processor(
         stdout_preview = (proc.stdout or b"")[:2000].decode("utf-8", errors="replace")
         raise RuntimeError(f"call_processor failed rc={proc.returncode} stdout={stdout_preview!r} stderr={stderr_preview!r}")
 
-def _get_deepgram_timeout_seconds() -> float:
-    raw = os.getenv("DEEPGRAM_TIMEOUT_SECONDS", "300").strip()
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("Invalid DEEPGRAM_TIMEOUT_SECONDS=%r; defaulting to 300", raw)
-        return 300.0
-
 
 def get_models(language: str | None = None) -> list[str]:
     models = DEEPGRAM_TTS_MODELS
@@ -234,14 +291,15 @@ async def get_speech(request: Request):
     if not text:
         raise HTTPException(status_code=400, detail="Missing required field: text")
 
-    requested_encoding = (input_params.get("encoding") or "").strip().lower()
-    requested_container = (input_params.get("container") or "").strip().lower()
-    if requested_encoding and requested_encoding != "mp3":
-        raise HTTPException(status_code=400, detail="Only MP3 output is supported (encoding=mp3)")
-    if requested_container and requested_container != "mp3":
+    # Enforce MP3 output format
+    encoding = (input_params.get("encoding") or "").strip().lower()
+    container = (input_params.get("container") or "").strip().lower()
+    if encoding and encoding != "mp3":
+        raise HTTPException(status_code=400, detail="Only MP3 output is supported")
+    if container and container != "mp3":
         raise HTTPException(status_code=400, detail="Only MP3 output is supported")
 
-    # use lanchain text splitter to split text into smaller chunks
+    # use langchain text splitter to split text into smaller chunks
     # Deepgram TTS can handle 2000 characters per request https://developers.deepgram.com/docs/text-to-speech#input-text-limit
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=2000,
@@ -252,84 +310,42 @@ async def get_speech(request: Request):
     if not chunks:
         raise HTTPException(status_code=400, detail="Text is empty")
 
-    # https://developers.deepgram.com/reference/text-to-speech/speak-request
-    deepgram_params = {
-        "callback": "",
-        "callback_method": "",
-        "mip_opt_out": "false",
-        "tag": "",
-        "bit_rate": "",
-        "model": "",
-        "sample_rate": ""
-    }
-
-    params: dict[str, str] = {}
-    for k, v in deepgram_params.items():
-        if k in input_params and str(input_params[k]).strip():
-            params[k] = str(input_params[k]).strip()
-        elif str(v).strip():
-            params[k] = str(v).strip()
-
-    if not params.get("model") and language:
+    if not input_params.get("model") and language:
         models = get_models(language)
         if not models:
             raise HTTPException(status_code=400, detail=f"No TTS model available for language: {language}")
-        params["model"] = models[0]
-    params["encoding"] = "mp3"
+        input_params["model"] = models[0]
 
-    logger.debug("Deepgram TTS params: %s", params)
+    # Build SpeakOptions with valid TTS parameters
+    speak_kwargs = {}
+    if input_params.get("model"):
+        speak_kwargs["model"] = input_params["model"]
+    if input_params.get("sample_rate"):
+        speak_kwargs["sample_rate"] = int(input_params["sample_rate"])
+    if input_params.get("bit_rate"):
+        speak_kwargs["bit_rate"] = int(input_params["bit_rate"])
+    speak_kwargs["encoding"] = "mp3"
 
-    url = "https://api.deepgram.com/v1/speak"
-    headers = {
-        "Authorization": f"Token {DEEPGRAM_API_KEY}",
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg",
-    }
+    options = SpeakOptions(**speak_kwargs)
+    logger.debug("Deepgram TTS options: %s", speak_kwargs)
 
     audio_parts: list[bytes] = []
     try:
-        deepgram_timeout_seconds = _get_deepgram_timeout_seconds()
-        timeout = httpx.Timeout(
-            connect=10.0,
-            read=deepgram_timeout_seconds,
-            write=deepgram_timeout_seconds,
-            pool=10.0,
-        )
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            for idx, chunk in enumerate(chunks, start=1):
-                response = await client.post(
-                    url,
-                    headers=headers,
-                    params=params,
-                    json={"text": chunk},
-                )
-                try:
-                    logger.debug(
-                        "Deepgram TTS response: chunk=%s/%s status=%s content_type=%s bytes=%s",
-                        idx,
-                        len(chunks),
-                        response.status_code,
-                        response.headers.get("Content-Type"),
-                        len(response.content or b""),
-                    )
-                except Exception:
-                    logger.debug("Failed to log Deepgram TTS response meta")
-                response.raise_for_status()
-                audio_parts.append(response.content)
-    except httpx.HTTPStatusError as e:
-        try:
-            status = e.response.status_code if e.response is not None else 502
-            body_preview = (
-                e.response.text[:500]
-                if e.response is not None and hasattr(e.response, "text") and e.response.text
-                else ""
+        for idx, chunk in enumerate(chunks, start=1):
+            audio_data = await run_in_threadpool(
+                _tts_chunk_to_bytes_sync, chunk, options
             )
-            logger.error("Deepgram TTS API error: status=%s body_preview=%s", status, body_preview)
-        except Exception:
-            logger.error("Deepgram TTS API error (logging failed)")
+            logger.debug(
+                "Deepgram TTS response: chunk=%s/%s bytes=%s",
+                idx, len(chunks), len(audio_data),
+            )
+            audio_parts.append(audio_data)
+    except DeepgramApiError as e:
+        status = int(e.status) if e.status else 502
+        logger.error("Deepgram TTS API error: status=%s message=%s", e.status, e.message)
         raise HTTPException(
-            status_code=e.response.status_code if e.response is not None else 502,
-            detail=f"Deepgram API error: {e.response.text if e.response is not None else ''}",
+            status_code=status,
+            detail=f"Deepgram API error: {e.message}",
         )
     except httpx.TimeoutException:
         logger.warning("Deepgram TTS request timed out")
@@ -341,7 +357,12 @@ async def get_speech(request: Request):
         logger.exception("Unexpected error while calling Deepgram TTS")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-    audio_bytes = b"".join(audio_parts)
+    try:
+        audio_bytes = await _concat_and_boost_mp3_ffmpeg(audio_parts, gain=8.0)
+    except Exception as e:
+        logger.exception("Failed to post-process TTS audio with ffmpeg")
+        raise HTTPException(status_code=500, detail=f"Failed to post-process audio: {str(e)}")
+
     if not audio_bytes:
         raise HTTPException(status_code=500, detail="Deepgram returned empty audio")
 
@@ -463,7 +484,7 @@ async def get_transcription(
             params[k] = v
 
     try:
-        deepgram_timeout_seconds = _get_deepgram_timeout_seconds()
+        deepgram_timeout_seconds = 300.0
         timeout = httpx.Timeout(
             connect=10.0,
             read=deepgram_timeout_seconds,

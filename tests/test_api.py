@@ -366,7 +366,6 @@ class TestGetSpeech:
             "/api/get_speech",
             data={
                 "text": source_text,
-                "sample_rate": "16000",
                 "model": "aura-2-melia-it"
             },
         )
