@@ -360,7 +360,7 @@ class TestGetSpeech:
         reason="DEEPGRAM_API_KEY is not set or empty",
     )
     def test_get_speech_and_transcription_roundtrip_italian(self, client, tmp_path):
-        source_text = "questo è un test delle api"
+        source_text = "questa è una prova"
 
         tts_response = client.post(
             "/api/get_speech",

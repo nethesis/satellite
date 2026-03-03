@@ -383,7 +383,8 @@ async def get_transcription(
     request: Request,
     file: UploadFile = File(...)
 ):
-    if file.content_type not in ("audio/wav", "audio/x-wav"):
+    if file.content_type not in ("audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"):
+        logger.warning("Unsupported file type: %s", file.content_type)
         raise HTTPException(status_code=400, detail="Invalid file type. Only WAV files are supported.")
 
     audio_bytes = await file.read()
