@@ -211,7 +211,7 @@ class TestGetTranscription:
         """Test that non-WAV files are rejected."""
         response = client.post(
             "/api/get_transcription",
-            files={"file": ("test.mp3", b"fake audio data", "audio/mp3")}
+            files={"file": ("test.avi", b"fake audio data", "video/avi")}
         )
 
         assert response.status_code == 400
@@ -401,20 +401,9 @@ class TestGetSpeech:
 
         assert normalize(transcript) == normalize(source_text)
 
-    @patch("httpx.AsyncClient")
-    def test_get_speech_returns_mp3_and_filename(self, mock_client_class, client):
-        mock_response = Mock()
-        mock_response.content = b"MP3DATA"
-        mock_response.status_code = 200
-        mock_response.headers = {"Content-Type": "audio/mpeg"}
-        mock_response.raise_for_status = Mock()
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_class.return_value = mock_client
-
+    @patch("api._concat_and_boost_mp3_ffmpeg", new_callable=AsyncMock, return_value=b"MP3DATA")
+    @patch("api._tts_chunk_to_bytes_sync", return_value=b"MP3DATA")
+    def test_get_speech_returns_mp3_and_filename(self, mock_tts, mock_ffmpeg, client):
         response = client.post("/api/get_speech", data={"text": "hello"})
 
         assert response.status_code == 200
@@ -423,99 +412,49 @@ class TestGetSpeech:
         assert "content-disposition" in response.headers
         assert "speech-" in response.headers["content-disposition"]
 
-    @patch("httpx.AsyncClient")
-    def test_get_speech_splits_and_concatenates(self, mock_client_class, client):
-        resp1 = Mock()
-        resp1.content = b"AAA"
-        resp1.status_code = 200
-        resp1.headers = {"Content-Type": "audio/mpeg"}
-        resp1.raise_for_status = Mock()
-
-        resp2 = Mock()
-        resp2.content = b"BBB"
-        resp2.status_code = 200
-        resp2.headers = {"Content-Type": "audio/mpeg"}
-        resp2.raise_for_status = Mock()
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=[resp1, resp2])
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_class.return_value = mock_client
-
+    @patch("api._concat_and_boost_mp3_ffmpeg", new_callable=AsyncMock, return_value=b"AAABBB")
+    @patch("api._tts_chunk_to_bytes_sync", side_effect=[b"AAA", b"BBB"])
+    def test_get_speech_splits_and_concatenates(self, mock_tts, mock_ffmpeg, client):
         # api.py uses a fixed 2000-char chunk size; use a 2001-char input to force 2 requests.
         response = client.post("/api/get_speech", data={"text": "a" * 2001})
 
         assert response.status_code == 200
         assert response.content == b"AAABBB"
-        assert mock_client.post.call_count == 2
+        assert mock_tts.call_count == 2
 
-    @patch("httpx.AsyncClient")
-    def test_get_speech_ignores_unknown_params(self, mock_client_class, client):
-        mock_response = Mock()
-        mock_response.content = b"MP3DATA"
-        mock_response.status_code = 200
-        mock_response.headers = {"Content-Type": "audio/mpeg"}
-        mock_response.raise_for_status = Mock()
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_class.return_value = mock_client
-
+    @patch("api._concat_and_boost_mp3_ffmpeg", new_callable=AsyncMock, return_value=b"MP3DATA")
+    @patch("api._tts_chunk_to_bytes_sync", return_value=b"MP3DATA")
+    def test_get_speech_ignores_unknown_params(self, mock_tts, mock_ffmpeg, client):
         response = client.post("/api/get_speech?unknown_param=1", data={"text": "hello"})
 
         assert response.status_code == 200
 
-        _, kwargs = mock_client.post.call_args
-        assert "params" in kwargs
-        assert "unknown_param" not in kwargs["params"]
+        _, options = mock_tts.call_args[0]
+        options_dict = options.to_dict()
+        assert "unknown_param" not in options_dict
 
-    @patch("httpx.AsyncClient")
-    def test_get_speech_uses_first_language_model_if_missing_model(self, mock_client_class, client):
+    @patch("api._concat_and_boost_mp3_ffmpeg", new_callable=AsyncMock, return_value=b"MP3DATA")
+    @patch("api._tts_chunk_to_bytes_sync", return_value=b"MP3DATA")
+    def test_get_speech_uses_first_language_model_if_missing_model(self, mock_tts, mock_ffmpeg, client):
         from api import get_models
-
-        mock_response = Mock()
-        mock_response.content = b"MP3DATA"
-        mock_response.status_code = 200
-        mock_response.headers = {"Content-Type": "audio/mpeg"}
-        mock_response.raise_for_status = Mock()
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_class.return_value = mock_client
 
         response = client.post("/api/get_speech", data={"text": "hello", "language": "it"})
 
         assert response.status_code == 200
-        _, kwargs = mock_client.post.call_args
-        assert kwargs["params"]["model"] == get_models("it")[0]
+        _, options = mock_tts.call_args[0]
+        assert options.model == get_models("it")[0]
 
-    @patch("httpx.AsyncClient")
-    def test_get_speech_explicit_model_takes_precedence_over_language(self, mock_client_class, client):
-        mock_response = Mock()
-        mock_response.content = b"MP3DATA"
-        mock_response.status_code = 200
-        mock_response.headers = {"Content-Type": "audio/mpeg"}
-        mock_response.raise_for_status = Mock()
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_class.return_value = mock_client
-
+    @patch("api._concat_and_boost_mp3_ffmpeg", new_callable=AsyncMock, return_value=b"MP3DATA")
+    @patch("api._tts_chunk_to_bytes_sync", return_value=b"MP3DATA")
+    def test_get_speech_explicit_model_takes_precedence_over_language(self, mock_tts, mock_ffmpeg, client):
         response = client.post(
             "/api/get_speech",
             data={"text": "hello", "language": "it", "model": "aura-2-elio-it"},
         )
 
         assert response.status_code == 200
-        _, kwargs = mock_client.post.call_args
-        assert kwargs["params"]["model"] == "aura-2-elio-it"
+        _, options = mock_tts.call_args[0]
+        assert options.model == "aura-2-elio-it"
 
     def test_get_speech_language_without_available_model_returns_400(self, client):
         response = client.post("/api/get_speech", data={"text": "hello", "language": "zz"})
@@ -533,56 +472,30 @@ class TestGetSpeech:
         assert response.status_code == 400
         assert "Only MP3 output is supported" in response.json()["detail"]
 
-    @patch("httpx.AsyncClient")
-    def test_get_speech_ignores_container_mp3_for_deepgram(self, mock_client_class, client):
-        mock_response = Mock()
-        mock_response.content = b"MP3DATA"
-        mock_response.status_code = 200
-        mock_response.headers = {"Content-Type": "audio/mpeg"}
-        mock_response.raise_for_status = Mock()
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_class.return_value = mock_client
-
+    @patch("api._concat_and_boost_mp3_ffmpeg", new_callable=AsyncMock, return_value=b"MP3DATA")
+    @patch("api._tts_chunk_to_bytes_sync", return_value=b"MP3DATA")
+    def test_get_speech_ignores_container_mp3_for_deepgram(self, mock_tts, mock_ffmpeg, client):
         response = client.post("/api/get_speech", data={"text": "hello", "container": "mp3"})
 
         assert response.status_code == 200
-        _, kwargs = mock_client.post.call_args
-        assert kwargs["params"]["encoding"] == "mp3"
-        assert "container" not in kwargs["params"]
+        _, options = mock_tts.call_args[0]
+        assert options.encoding == "mp3"
+        assert not options.container
 
     def test_get_speech_missing_text_returns_400(self, client):
         response = client.post("/api/get_speech", data={})
         assert response.status_code == 400
 
-    @patch("httpx.AsyncClient")
-    def test_get_speech_deepgram_timeout_returns_504(self, mock_client_class, client):
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=httpx.ReadTimeout("Timed out", request=Mock()))
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_class.return_value = mock_client
-
+    @patch("api._tts_chunk_to_bytes_sync", side_effect=httpx.ReadTimeout("Timed out", request=Mock()))
+    def test_get_speech_deepgram_timeout_returns_504(self, mock_tts, client):
         response = client.post("/api/get_speech", data={"text": "hello"})
         assert response.status_code == 504
 
-    @patch("httpx.AsyncClient")
-    def test_get_speech_deepgram_http_error_propagates_status(self, mock_client_class, client):
-        mock_response = Mock()
-        mock_response.status_code = 401
-        mock_response.text = "Invalid API key"
+    @patch("api._tts_chunk_to_bytes_sync")
+    def test_get_speech_deepgram_http_error_propagates_status(self, mock_tts, client):
+        from deepgram.clients.common.v1.errors import DeepgramApiError
 
-        error = httpx.HTTPStatusError("Unauthorized", request=Mock(), response=mock_response)
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_response.raise_for_status = Mock(side_effect=error)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_class.return_value = mock_client
+        mock_tts.side_effect = DeepgramApiError("Invalid API key", "401")
 
         response = client.post("/api/get_speech", data={"text": "hello"})
         assert response.status_code == 401

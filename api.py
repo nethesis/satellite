@@ -189,8 +189,9 @@ async def _concat_and_boost_mp3_ffmpeg(chunks: list[bytes], gain: float = 8.0) -
 def _tts_chunk_to_bytes_sync(text: str, options: SpeakOptions) -> bytes:
     """Synthesize a single text chunk via Deepgram SDK and return audio bytes."""
     deepgram = DeepgramClient(DEEPGRAM_API_KEY)
+    timeout = httpx.Timeout(connect=10.0, read=300.0, write=300.0, pool=10.0)
     response = deepgram.speak.rest.v("1").stream_memory(
-        {"text": text}, options
+        {"text": text}, options, timeout=timeout
     )
     return response.stream_memory.read()
 
