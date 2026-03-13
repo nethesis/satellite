@@ -51,6 +51,7 @@ class DeepgramConnector:
         self.dg_connection = None
         self.loop = None
         self.complete_call = []
+        self.latest_interim_by_channel = {}
         self._close_started = False
         self._close_lock = asyncio.Lock()
         self._first_transcript_logged = False
@@ -131,12 +132,16 @@ class DeepgramConnector:
             speaker_counterpart_name = self.speaker_name_in
             speaker_counterpart_number = self.speaker_number_in
         try:
+            channel_index = result.channel_index[0]
+            segment_start = float(result.start)
             await self.mqtt_client.publish(
                     topic='transcription',
                     payload=json.dumps({
                         "uniqueid": self.uniqueid,
                         "transcription": transcription,
                         "timestamp": timestamp,
+                        "channel_index": channel_index,
+                        "segment_start": segment_start,
                         "speaker_name": speaker_name,
                         "speaker_number": speaker_number,
                         "speaker_counterpart_name": speaker_counterpart_name,
@@ -144,18 +149,23 @@ class DeepgramConnector:
                         "is_final": result.is_final,
                     })
                 )
+            message = {
+                "uniqueid": self.uniqueid,
+                "transcription": transcription,
+                "timestamp": timestamp,
+                "channel_index": channel_index,
+                "segment_start": segment_start,
+                "speaker_name": speaker_name,
+                "speaker_number": speaker_number,
+                "speaker_counterpart_name": speaker_counterpart_name,
+                "speaker_counterpart_number": speaker_counterpart_number,
+                "is_final": result.is_final,
+            }
+            self.latest_interim_by_channel[channel_index] = message
             # save the transcription to the complete_call if it is final
             if result.is_final:
-                self.complete_call.append({
-                    "uniqueid": self.uniqueid,
-                    "transcription": transcription,
-                    "timestamp": timestamp,
-                    "speaker_name": speaker_name,
-                    "speaker_number": speaker_number,
-                    "speaker_counterpart_name": speaker_counterpart_name,
-                    "speaker_counterpart_number": speaker_counterpart_number,
-                    "is_final": result.is_final,
-                })
+                self.complete_call.append(message)
+                self.latest_interim_by_channel.pop(channel_index, None)
         except Exception as e:
                 logger.error(f"Failed to schedule transcription publishing: {e}")
 
@@ -287,14 +297,34 @@ class DeepgramConnector:
                             await socket.close()
                 except Exception as e:
                     logger.debug(f"Deepgram socket close failed for {self.uniqueid}: {e}")
+
+        # Give the SDK a short window to emit final transcript callbacks after finalize().
+        await asyncio.sleep(0.5)
+
         # publish full conversation to mqtt
+        messages = list(self.complete_call)
+        if not messages and self.latest_interim_by_channel:
+            messages = sorted(
+                self.latest_interim_by_channel.values(),
+                key=lambda item: item.get("timestamp", 0),
+            )
+            logger.info(
+                "Publishing fallback final transcript for %s using %d interim segment(s)",
+                self.uniqueid,
+                len(messages),
+            )
+
         text = ""
         last_speaker = None
-        for message in self.complete_call:
+        for message in messages:
             if last_speaker != message["speaker_name"]:
                 text += f'\n{message["speaker_name"]}: '
             text += f'{message["transcription"]}\n'
             last_speaker = message["speaker_name"]
+
+        if not text.strip():
+            logger.warning("No transcript content available to publish for %s", self.uniqueid)
+            return
 
         # publish the full conversation to mqtt
         await self.mqtt_client.publish(
