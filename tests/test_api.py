@@ -388,6 +388,44 @@ class TestGetTranscription:
         assert response.status_code == 500
         assert "Failed to parse transcription response" in response.json()["detail"]
 
+    @patch('transcription.voxtral.httpx.AsyncClient')
+    @patch('api.get_provider')
+    def test_provider_voxtral_returns_transcript(self, mock_get_provider, mock_client_class, client, valid_wav_content, monkeypatch):
+        """When provider=voxtral is passed, the VoxTral provider is used and its response is returned."""
+        monkeypatch.setenv("MISTRAL_API_KEY", "test_mistral_key")
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "text": "Hello from VoxTral",
+            "language": "en",
+            "segments": [],
+        }
+        mock_response.raise_for_status = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '{"text":"Hello from VoxTral","language":"en","segments":[]}'
+        mock_response.headers.get.return_value = "application/json"
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        # Use the real provider factory so provider selection is exercised end-to-end
+        from transcription import get_provider as real_get_provider
+        mock_get_provider.side_effect = real_get_provider
+
+        response = client.post(
+            "/api/get_transcription",
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"provider": "voxtral"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["transcript"] == "Hello from VoxTral"
+        assert data["detected_language"] == "en"
+
 
 class TestGetSpeech:
     """Tests for the /api/get_speech endpoint."""
