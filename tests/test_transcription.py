@@ -218,9 +218,9 @@ class TestVoxtralProvider:
                 params={"diarize": "true"}
             )
 
-        # Should format with speaker labels
-        assert "speaker_1:" in result.raw_transcription
-        assert "speaker_2:" in result.raw_transcription
+        # Should format with normalized "Speaker N:" labels
+        assert "Speaker 0:" in result.raw_transcription
+        assert "Speaker 1:" in result.raw_transcription
         assert "Hello" in result.raw_transcription
         assert "Hi there" in result.raw_transcription
 
@@ -259,9 +259,9 @@ class TestVoxtralProvider:
         call_args = mock_http.return_value.__aenter__.return_value.post.call_args
         assert call_args[1]["data"]["diarize"] is True
 
-        # Should format with speaker labels by default
-        assert "speaker_1:" in result.raw_transcription
-        assert "speaker_2:" in result.raw_transcription
+        # Should format with normalized "Speaker N:" labels by default
+        assert "Speaker 0:" in result.raw_transcription
+        assert "Speaker 1:" in result.raw_transcription
         assert "First speaker says hello" in result.raw_transcription
         assert "Second speaker responds" in result.raw_transcription
 
