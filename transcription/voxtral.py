@@ -31,7 +31,7 @@ class VoxtralProvider(TranscriptionProvider):
 
         # VoxTral parameters
         data = {
-            "model": params.get("model", "voxtral-mini-latest"),
+            "model": params.get("model") or "voxtral-mini-latest",
         }
 
         # Optional parameters
