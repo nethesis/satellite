@@ -107,7 +107,16 @@ class DeepgramProvider(TranscriptionProvider):
 
             response.raise_for_status()
 
-        result = response.json()
+        try:
+            result = response.json()
+        except ValueError as e:
+            body_preview = response.text[:500] if response.text else ""
+            raise ValueError(
+                f"Failed to decode Deepgram JSON response "
+                f"(status {response.status_code}, "
+                f"content-type {response.headers.get('Content-Type')}): {e}; "
+                f"body preview: {body_preview!r}"
+            )
         detected_language = None
 
         # Parse transcription from response
