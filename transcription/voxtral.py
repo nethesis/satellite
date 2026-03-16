@@ -152,13 +152,12 @@ class VoxtralProvider(TranscriptionProvider):
 
             # Add speaker label when speaker changes
             if speaker is not None and speaker != last_speaker:
-                # Format as "Speaker N:" to match common convention
-                lines.append(f"\n{speaker}: {text}")
+                lines.append(f"{speaker}: {text}")
                 last_speaker = speaker
             else:
-                # Continue current speaker's text
+                # Continue current speaker's text on the same line
                 if lines:
-                    lines.append(text)
+                    lines[-1] = f"{lines[-1]} {text}"
                 else:
                     lines.append(text)
 
