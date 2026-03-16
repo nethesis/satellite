@@ -140,15 +140,22 @@ class VoxtralProvider(TranscriptionProvider):
         """Format segments with speaker diarization into a readable transcript."""
         lines = []
         last_speaker = None
+        speaker_index: dict[str, int] = {}
 
         for seg in segments:
             # VoXtral uses "speaker_id" field (e.g., "speaker_1", "speaker_2")
             # Fall back to "speaker" for backward compatibility with test mocks
-            speaker = seg.get("speaker_id") or seg.get("speaker")
+            raw_speaker = seg.get("speaker_id") or seg.get("speaker")
             text = seg.get("text", "").strip()
 
             if not text:
                 continue
+
+            # Normalize raw_speaker (e.g. "speaker_1") to "Speaker 0:", "Speaker 1:", ...
+            # using 0-indexed assignment order of first appearance.
+            if raw_speaker is not None and raw_speaker not in speaker_index:
+                speaker_index[raw_speaker] = len(speaker_index)
+            speaker = f"Speaker {speaker_index[raw_speaker]}" if raw_speaker is not None else None
 
             # Add speaker label when speaker changes
             if speaker is not None and speaker != last_speaker:
