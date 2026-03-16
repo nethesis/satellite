@@ -501,7 +501,7 @@ async def get_transcription(
                 await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
             except Exception:
                 logger.exception("Failed to update transcript state=failed")
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail="Unexpected error while processing transcription")
 
     # Apply channel name replacements (provider-agnostic post-processing)
     if channel0_name:
