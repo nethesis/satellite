@@ -146,7 +146,7 @@ Optional fields (query string or multipart form fields):
 - `uniqueid`: Asterisk-style uniqueid like `1234567890.1234` (required only when `persist=true`)
 - `persist`: `true|false` (default `false`) — persist raw transcript to Postgres (requires `PGVECTOR_*` env vars)
 - `summary`: `true|false` (default `false`) — run AI enrichment (requires `OPENAI_API_KEY` and also `persist=true` so there is a DB record to update)
-- `channel0_name`, `channel1_name`: rename diarization labels in the returned transcript (replaces `Channel 0:` / `Channel 1:` or `Speaker 0:` / `Speaker 1:`)
+- `channel0_name`, `channel1_name`: rename diarization labels in the returned transcript (replaces `Channel 0:` / `Channel 1:`, `Speaker 0:` / `Speaker 1:`, and their uppercase variants; both Deepgram and VoxTral output are normalized to this format)
 
 Provider-specific parameters:
 - **Deepgram**: Most Deepgram `/v1/listen` parameters may be provided as query/form fields (e.g., `model`, `language`, `diarize`, `punctuate`)
