@@ -139,7 +139,7 @@ This requires the `vector` extension (pgvector) in your Postgres instance.
 Accepts a WAV upload and returns a transcription from the configured provider (Deepgram or VoxTral).
 
 Request requirements:
-- Content type: multipart form upload with a `file` field (`audio/wav` or `audio/x-wav`)
+- Content type: multipart form upload with a `file` field (`audio/wav`, `audio/x-wav`, `audio/mpeg`, or `audio/mp3`)
 
 Optional fields (query string or multipart form fields):
 - `provider`: Override the transcription provider (`deepgram` or `voxtral`). If not set, uses `TRANSCRIPTION_PROVIDER` env var (default: `deepgram`)
