@@ -92,15 +92,16 @@ class VoxtralProvider(TranscriptionProvider):
             )
 
             # Debug logging
-            try:
-                logger.debug(
-                    "VoxTral response: status=%s content_type=%s body_preview=%s",
-                    response.status_code,
-                    response.headers.get("Content-Type"),
-                    (response.text[:500] if response.text else ""),
-                )
-            except Exception:
-                logger.debug("Failed to log VoxTral response preview")
+            if logger.isEnabledFor(logging.DEBUG):
+                try:
+                    logger.debug(
+                        "VoxTral response: status=%s content_type=%s body_preview=%s",
+                        response.status_code,
+                        response.headers.get("Content-Type"),
+                        (response.text[:500] if response.text else ""),
+                    )
+                except Exception:
+                    logger.debug("Failed to log VoxTral response preview")
 
             response.raise_for_status()
 
