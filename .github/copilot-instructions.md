@@ -12,7 +12,7 @@ pytest
 
 # Run a single test file / single test
 pytest tests/test_api.py
-pytest tests/test_api.py::test_get_transcription_success -k "test_get_transcription_success"
+pytest tests/test_api.py::TestGetTranscription::test_valid_wav_file
 
 # Run the app
 python main.py
