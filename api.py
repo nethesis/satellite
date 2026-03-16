@@ -506,10 +506,14 @@ async def get_transcription(
     # Apply channel name replacements (provider-agnostic post-processing)
     if channel0_name:
         raw_transcription = raw_transcription.replace("Channel 0:", f"{channel0_name}:")
+        raw_transcription = raw_transcription.replace("CHANNEL 0:", f"{channel0_name}:")
         raw_transcription = raw_transcription.replace("Speaker 0:", f"{channel0_name}:")
+        raw_transcription = raw_transcription.replace("SPEAKER 0:", f"{channel0_name}:")
     if channel1_name:
         raw_transcription = raw_transcription.replace("Channel 1:", f"{channel1_name}:")
+        raw_transcription = raw_transcription.replace("CHANNEL 1:", f"{channel1_name}:")
         raw_transcription = raw_transcription.replace("Speaker 1:", f"{channel1_name}:")
+        raw_transcription = raw_transcription.replace("SPEAKER 1:", f"{channel1_name}:")
 
     # Persist raw transcript when Postgres config is present (default) unless disabled per request.
     if transcript_id is not None:
