@@ -26,6 +26,8 @@ def get_provider(name: str | None = None) -> TranscriptionProvider:
     """
     if name is None:
         name = os.getenv("TRANSCRIPTION_PROVIDER", "deepgram").strip().lower()
+    else:
+        name = name.strip().lower()
 
     if name == "deepgram":
         api_key = os.getenv("DEEPGRAM_API_KEY", "").strip()
