@@ -169,13 +169,13 @@ class DeepgramConnector:
         except Exception as e:
                 logger.error(f"Failed to schedule transcription publishing: {e}")
 
-    def on_metadata(self, client, metadata, **kwargs):
+    async def on_metadata(self, client, metadata, **kwargs):
         """
         Handle metadata events
         """
         return
 
-    def on_error(self, client, error, **kwargs):
+    async def on_error(self, client, error, **kwargs):
         """
         Handle error events
         """

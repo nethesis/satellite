@@ -82,3 +82,14 @@ async def test_close_prefers_final_segments(monkeypatch):
     payload = connector.mqtt_client.publish.await_args.kwargs["payload"]
     assert "final text" in payload
     assert "interim text" not in payload
+
+
+@pytest.mark.asyncio
+async def test_on_error_is_awaitable_and_schedules_close():
+    connector = _make_connector()
+    connector.loop = AsyncMock()
+    connector.loop.is_running.return_value = True
+
+    await connector.on_error(None, {"message": "boom"})
+
+    connector.loop.call_soon_threadsafe.assert_called_once()
