@@ -245,6 +245,7 @@ class AsteriskBridge:
                 or self.channels[channel_id]['linkedid'] in self.pending_transcription_requests
             )
             self.channels[channel_id]['connector_started'] = False
+            self.channels[channel_id]['connector_starting'] = False
             self.pending_transcription_requests.discard(channel_id)
             logger.debug(f"Channel {channel_id} entered Satellite. Details: {channel}")
             # Create a snoop channel for in and one for out
@@ -386,11 +387,14 @@ class AsteriskBridge:
             channel = self.channels[channel_id]
             if channel.get('connector_started'):
                 return
+            if channel.get('connector_starting'):
+                return
 
             if 'rtp_stream_in' not in channel or 'rtp_stream_out' not in channel:
                 logger.info(f"Transcription requested for {channel_id} but RTP streams are not ready yet")
                 return
 
+            channel['connector_starting'] = True
             if channel.get('call_elapsed_at_start') is None:
                 channel['call_elapsed_at_start'] = await self._get_answered_elapsed_seconds(channel_id)
 
@@ -399,8 +403,11 @@ class AsteriskBridge:
 
             await channel['connector'].start()
             channel['connector_started'] = True
+            channel['connector_starting'] = False
             logger.info(f"Deepgram connector started for channel {channel_id}")
         except Exception as e:
+            if channel_id in self.channels:
+                self.channels[channel_id]['connector_starting'] = False
             logger.error(f"Failed to start Deepgram connector for channel {channel_id}: {e}")
             # Close the channel if connector fails to start
             if channel_id in self.channels:
@@ -444,6 +451,7 @@ class AsteriskBridge:
                 except Exception as e:
                     logger.debug(f"Failed to close connector for channel {channel_id}: {e}")
                 channel['connector_started'] = False
+                channel['connector_starting'] = False
 
     async def _handle_stasis_end(self, event):
         """Handle channel hangup event"""
