@@ -1,9 +1,9 @@
 import logging
 import time
+import unicodedata
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -33,6 +33,57 @@ def _clamp_sentiment(value: int) -> int:
     if value > 10:
         return 10
     return value
+
+
+def _sanitize_text_for_llm(text: str) -> str:
+    if not text:
+        return ""
+
+    sanitized_chars = []
+    changed = False
+    for char in text:
+        if char == "\x00" or unicodedata.category(char) == "Cs":
+            changed = True
+            continue
+        sanitized_chars.append(char)
+
+    sanitized = "".join(sanitized_chars)
+    if sanitized != text:
+        changed = True
+
+    # Ensure the payload can always be encoded as valid UTF-8 JSON.
+    utf8_sanitized = sanitized.encode("utf-8", errors="ignore").decode("utf-8")
+    if utf8_sanitized != sanitized:
+        changed = True
+
+    if changed:
+        logger.warning(
+            "AI pipeline: sanitized text for LLM (before_len=%d after_len=%d)",
+            len(text),
+            len(utf8_sanitized),
+        )
+
+    return utf8_sanitized
+
+
+def _is_invalid_json_body_error(error: Exception) -> bool:
+    message = str(error or "").lower()
+    return "parse the json body" in message or "not valid json" in message
+
+
+def _invoke_chain(chain, text: str, stage: str) -> str:
+    sanitized_text = _sanitize_text_for_llm(text)
+    try:
+        response = chain.invoke({"text": sanitized_text})
+        return (response.content or "").strip()
+    except Exception as error:
+        if not _is_invalid_json_body_error(error):
+            raise
+
+        logger.warning("AI pipeline: retrying %s after invalid JSON body error", stage)
+        retry_text = _sanitize_text_for_llm(sanitized_text)
+        response = chain.invoke({"text": retry_text})
+        return (response.content or "").strip()
 
 
 def generate_clean_summary_sentiment(text: str):
@@ -147,11 +198,11 @@ Maria Bianchi: Sì? dimmi pure
     for idx, chunk in enumerate(chunks):
         try:
             logger.debug("AI pipeline: cleaning chunk %d/%d (len=%d)", idx + 1, len(chunks), len(chunk))
-            cleaned_chunks.append(clean_chain.invoke({"text": chunk}).content)
+            cleaned_chunks.append(_invoke_chain(clean_chain, chunk, f"clean chunk {idx + 1}/{len(chunks)}"))
         except Exception:
             logger.exception("AI pipeline: failed cleaning chunk %d/%d", idx + 1, len(chunks))
             raise
-    cleaned = "\n\n".join([c.strip() for c in cleaned_chunks if c and c.strip()]).strip()
+    cleaned = _sanitize_text_for_llm("\n\n".join([c.strip() for c in cleaned_chunks if c and c.strip()]).strip())
     logger.debug("AI pipeline: cleaned_len=%d", len(cleaned))
 
     summarize_chunk_prompt = ChatPromptTemplate.from_messages(
@@ -189,7 +240,13 @@ Summarize this chunk concisely.
     for idx, chunk in enumerate(summarize_chunks):
         try:
             logger.debug("AI pipeline: summarizing chunk %d/%d (len=%d)", idx + 1, len(summarize_chunks), len(chunk))
-            chunk_summaries.append(summarize_chunk_chain.invoke({"text": chunk}).content)
+            chunk_summaries.append(
+                _invoke_chain(
+                    summarize_chunk_chain,
+                    chunk,
+                    f"summarize chunk {idx + 1}/{len(summarize_chunks)}",
+                )
+            )
         except Exception:
             logger.exception("AI pipeline: failed summarizing chunk %d/%d", idx + 1, len(summarize_chunks))
             raise
@@ -219,11 +276,14 @@ No preamble or conclusion.
     )
     reduce_chain = reduce_prompt | llm
     try:
-        summary = reduce_chain.invoke({"text": "\n\n".join([s.strip() for s in chunk_summaries if s and s.strip()])}).content
+        summary = _invoke_chain(
+            reduce_chain,
+            "\n\n".join([s.strip() for s in chunk_summaries if s and s.strip()]),
+            "reduce summaries",
+        )
     except Exception:
         logger.exception("AI pipeline: failed reducing chunk summaries")
         raise
-    summary = (summary or "").strip()
     logger.debug("AI pipeline: summary_len=%d", len(summary))
 
     sentiment_prompt = ChatPromptTemplate.from_messages(
@@ -255,7 +315,7 @@ example output:3
     sentiment_chain = sentiment_prompt | llm
 
     try:
-        sentiment_text = sentiment_chain.invoke({"text": cleaned[:20000]}).content
+        sentiment_text = _invoke_chain(sentiment_chain, cleaned[:20000], "sentiment scoring")
     except Exception:
         logger.exception("AI pipeline: failed sentiment scoring")
         raise
