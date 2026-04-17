@@ -408,6 +408,7 @@ async def get_transcription(
     logger.debug(f"Params: {input_params}")
 
     uniqueid = (input_params.get("uniqueid") or "").strip()
+    linkedid = (input_params.get("linkedid") or "").strip()
     channel0_name = (input_params.get("channel0_name") or "").strip()
     channel1_name = (input_params.get("channel1_name") or "").strip()
     # Persist only when explicitly requested.
@@ -428,6 +429,7 @@ async def get_transcription(
             transcript_id = await run_in_threadpool(
                 db.upsert_transcript_progress,
                 uniqueid=uniqueid,
+                linkedid=linkedid,
             )
         except Exception:
             logger.exception("Failed to initialize transcript row for state tracking")
@@ -551,6 +553,29 @@ async def get_transcription(
 
     result = response.json()
     detected_language = None  # always define; mocks may omit this field
+
+    # Deepgram returned an explicitly empty channels list — audio was silent or
+    # zero-duration (e.g. a very short or dropped call).  Treat this as "nothing to
+    # transcribe": mark the row done so the cleanup service does not retry it, and return
+    # 200 so the bash script deletes the WAV files.  A 500 here would leave the WAV files
+    # on disk and trigger infinite retries.
+    # NOTE: we only handle the case where channels is present but empty ([]); if the key is
+    # absent entirely the response is genuinely malformed and falls through to the error path.
+    _channels = result.get("results", {}).get("channels")
+    if _channels is not None and not _channels:
+        duration = result.get("metadata", {}).get("duration", 0.0)
+        logger.warning(
+            "Deepgram returned no channels (duration=%.1f, uniqueid=%s) - audio is silent or empty; skipping",
+            duration,
+            uniqueid,
+        )
+        if transcript_id is not None:
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="done")
+            except Exception:
+                logger.exception("Failed to update transcript state=done after silent audio")
+        return {"transcript": "", "detected_language": None}
+
     try:
         if "paragraphs" in result["results"] and "transcript" in result["results"]["paragraphs"]:
             raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
@@ -593,6 +618,7 @@ async def get_transcription(
             transcript_id = await run_in_threadpool(
                 db.upsert_transcript_raw,
                 uniqueid=uniqueid,
+                linkedid=linkedid,
                 raw_transcription=raw_transcription,
             )
         except ValueError as e:

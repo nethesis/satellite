@@ -94,6 +94,7 @@ def _ensure_schema() -> None:
                 CREATE TABLE IF NOT EXISTS transcripts (
                     id BIGSERIAL PRIMARY KEY,
                     uniqueid TEXT NOT NULL UNIQUE,
+                    linkedid TEXT NULL,
                     raw_transcription TEXT NOT NULL,
                     state TEXT NOT NULL DEFAULT 'done',
                     cleaned_transcription TEXT,
@@ -127,6 +128,27 @@ def _ensure_schema() -> None:
 
             # Commit the core schema changes explicitly for clarity.
             conn.commit()
+
+            # Idempotent migration: ensure `linkedid TEXT NULL` exists on the transcripts table.
+            # Three cases for existing databases:
+            #   1. Column missing entirely (DB predates this column) → ADD COLUMN.
+            #   2. Column exists as NOT NULL (old migration that required it) → DROP NOT NULL.
+            #   3. Column exists as nullable → nothing to do.
+            linkedid_row = conn.execute(
+                """
+                SELECT is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name   = 'transcripts'
+                  AND column_name  = 'linkedid'
+                """
+            ).fetchone()
+            if linkedid_row is None:
+                conn.execute("ALTER TABLE transcripts ADD COLUMN linkedid TEXT NULL")
+                conn.commit()
+            elif linkedid_row[0] == "NO":
+                conn.execute("ALTER TABLE transcripts ALTER COLUMN linkedid DROP NOT NULL")
+                conn.commit()
 
             # "Modern" pgvector index: HNSW (if supported by server pgvector version)
             try:
@@ -162,7 +184,7 @@ def validate_transcript_state(state: str) -> None:
         raise ValueError(f"Invalid transcript state {state!r}; expected one of {', '.join(TRANSCRIPT_STATES)}")
 
 
-def upsert_transcript_progress(*, uniqueid: str) -> int:
+def upsert_transcript_progress(*, uniqueid: str, linkedid: Optional[str] = None) -> int:
     """Ensure a transcript row exists and mark it as 'progress'. Returns transcript id.
 
     This is used to represent a requested transcription before the Deepgram request
@@ -175,15 +197,16 @@ def upsert_transcript_progress(*, uniqueid: str) -> int:
     with _connect() as conn:
         row = conn.execute(
             """
-            INSERT INTO transcripts (uniqueid, raw_transcription, state)
-            VALUES (%s, %s, 'progress')
+            INSERT INTO transcripts (uniqueid, linkedid, raw_transcription, state)
+            VALUES (%s, %s, %s, 'progress')
             ON CONFLICT (uniqueid)
             DO UPDATE SET
+                linkedid = COALESCE(EXCLUDED.linkedid, transcripts.linkedid),
                 state = 'progress',
                 updated_at = now()
             RETURNING id
             """,
-            (uniqueid, ""),
+            (uniqueid, linkedid, ""),
         ).fetchone()
 
         if row is None:
@@ -227,6 +250,7 @@ def set_transcript_state_by_uniqueid(*, uniqueid: str, state: str) -> None:
 def upsert_transcript_raw(
     *,
     uniqueid: str,
+    linkedid: Optional[str] = None,
     raw_transcription: str,
 ) -> int:
     """Insert or update the raw transcript row and return its transcript id."""
@@ -237,15 +261,16 @@ def upsert_transcript_raw(
     with _connect() as conn:
         row = conn.execute(
             """
-            INSERT INTO transcripts (uniqueid, raw_transcription)
-            VALUES (%s, %s)
+            INSERT INTO transcripts (uniqueid, linkedid, raw_transcription)
+            VALUES (%s, %s, %s)
             ON CONFLICT (uniqueid)
             DO UPDATE SET
+                linkedid = COALESCE(EXCLUDED.linkedid, transcripts.linkedid),
                 raw_transcription = EXCLUDED.raw_transcription,
                 updated_at = now()
             RETURNING id
             """,
-            (uniqueid, raw_transcription),
+            (uniqueid, linkedid, raw_transcription),
         ).fetchone()
 
         if row is None:
