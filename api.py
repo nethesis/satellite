@@ -408,6 +408,8 @@ async def get_transcription(
     logger.debug(f"Params: {input_params}")
 
     uniqueid = (input_params.get("uniqueid") or "").strip()
+    src_number = (input_params.get("src_number") or "").strip() or None
+    dst_number = (input_params.get("dst_number") or "").strip() or None
     channel0_name = (input_params.get("channel0_name") or "").strip()
     channel1_name = (input_params.get("channel1_name") or "").strip()
     # Persist only when explicitly requested.
@@ -428,6 +430,8 @@ async def get_transcription(
             transcript_id = await run_in_threadpool(
                 db.upsert_transcript_progress,
                 uniqueid=uniqueid,
+                src_number=src_number,
+                dst_number=dst_number,
             )
         except Exception:
             logger.exception("Failed to initialize transcript row for state tracking")
@@ -551,6 +555,21 @@ async def get_transcription(
 
     result = response.json()
     detected_language = None  # always define; mocks may omit this field
+    channels = result.get("results", {}).get("channels")
+    if channels is not None and not channels:
+        duration = result.get("metadata", {}).get("duration", 0.0)
+        logger.warning(
+            "Deepgram returned no channels (duration=%.1f, uniqueid=%s); skipping empty audio",
+            duration,
+            uniqueid,
+        )
+        if transcript_id is not None:
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="done")
+            except Exception:
+                logger.exception("Failed to update transcript state=done after empty audio")
+        return {"transcript": "", "detected_language": None}
+
     try:
         if "paragraphs" in result["results"] and "transcript" in result["results"]["paragraphs"]:
             raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
@@ -594,6 +613,8 @@ async def get_transcription(
                 db.upsert_transcript_raw,
                 transcript_id=transcript_id,
                 uniqueid=uniqueid,
+                src_number=src_number,
+                dst_number=dst_number,
                 raw_transcription=raw_transcription,
             )
         except ValueError as e:

@@ -94,6 +94,8 @@ def _ensure_schema() -> None:
                 CREATE TABLE IF NOT EXISTS transcripts (
                     id BIGSERIAL PRIMARY KEY,
                     uniqueid TEXT NOT NULL,
+                    src_number TEXT,
+                    dst_number TEXT,
                     raw_transcription TEXT NOT NULL,
                     state TEXT NOT NULL DEFAULT 'done',
                     cleaned_transcription TEXT,
@@ -139,6 +141,23 @@ def _ensure_schema() -> None:
             # Commit the core schema changes explicitly for clarity.
             conn.commit()
 
+            # Idempotent migration: add participant tracking columns for
+            # existing databases created before these fields existed.
+            for col in ("src_number", "dst_number"):
+                col_exists = conn.execute(
+                    """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'transcripts'
+                      AND column_name = %s
+                    """,
+                    (col,),
+                ).fetchone()
+                if col_exists is None:
+                    conn.execute(f"ALTER TABLE transcripts ADD COLUMN {col} TEXT NULL")
+                    conn.commit()
+
             # "Modern" pgvector index: HNSW (if supported by server pgvector version)
             try:
                 # Run this in its own transaction so a failure doesn't leave the
@@ -173,7 +192,12 @@ def validate_transcript_state(state: str) -> None:
         raise ValueError(f"Invalid transcript state {state!r}; expected one of {', '.join(TRANSCRIPT_STATES)}")
 
 
-def upsert_transcript_progress(*, uniqueid: str) -> int:
+def upsert_transcript_progress(
+    *,
+    uniqueid: str,
+    src_number: Optional[str] = None,
+    dst_number: Optional[str] = None,
+) -> int:
     """Create a transcript row in 'progress' state. Returns transcript id.
 
     This is used to represent a requested transcription before the Deepgram request
@@ -186,11 +210,11 @@ def upsert_transcript_progress(*, uniqueid: str) -> int:
     with _connect() as conn:
         row = conn.execute(
             """
-            INSERT INTO transcripts (uniqueid, raw_transcription, state)
-            VALUES (%s, %s, 'progress')
+            INSERT INTO transcripts (uniqueid, src_number, dst_number, raw_transcription, state)
+            VALUES (%s, %s, %s, %s, 'progress')
             RETURNING id
             """,
-            (uniqueid, ""),
+            (uniqueid, src_number, dst_number, ""),
         ).fetchone()
 
         if row is None:
@@ -242,6 +266,8 @@ def upsert_transcript_raw(
     *,
     transcript_id: Optional[int] = None,
     uniqueid: str,
+    src_number: Optional[str] = None,
+    dst_number: Optional[str] = None,
     raw_transcription: str,
 ) -> int:
     """Persist the raw transcript row and return its transcript id."""
@@ -253,23 +279,25 @@ def upsert_transcript_raw(
         if transcript_id is None:
             row = conn.execute(
                 """
-                INSERT INTO transcripts (uniqueid, raw_transcription)
-                VALUES (%s, %s)
+                INSERT INTO transcripts (uniqueid, src_number, dst_number, raw_transcription)
+                VALUES (%s, %s, %s, %s)
                 RETURNING id
                 """,
-                (uniqueid, raw_transcription),
+                (uniqueid, src_number, dst_number, raw_transcription),
             ).fetchone()
         else:
             row = conn.execute(
                 """
                 UPDATE transcripts
-                SET raw_transcription = %s,
+                SET src_number = COALESCE(%s, src_number),
+                    dst_number = COALESCE(%s, dst_number),
+                    raw_transcription = %s,
                     updated_at = now()
                 WHERE id = %s
                   AND uniqueid = %s
                 RETURNING id
                 """,
-                (raw_transcription, transcript_id, uniqueid),
+                (src_number, dst_number, raw_transcription, transcript_id, uniqueid),
             ).fetchone()
 
         if row is None:
