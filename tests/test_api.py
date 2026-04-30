@@ -202,6 +202,7 @@ class TestGetTranscription:
 
         progress_mock.assert_called_once_with(uniqueid="1234567890.1234")
         upsert_mock.assert_called_once_with(
+            transcript_id=123,
             uniqueid="1234567890.1234",
             raw_transcription="SPEAKER 1: Hello world",
         )

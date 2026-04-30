@@ -93,7 +93,7 @@ def _ensure_schema() -> None:
                 """
                 CREATE TABLE IF NOT EXISTS transcripts (
                     id BIGSERIAL PRIMARY KEY,
-                    uniqueid TEXT NOT NULL UNIQUE,
+                    uniqueid TEXT NOT NULL,
                     raw_transcription TEXT NOT NULL,
                     state TEXT NOT NULL DEFAULT 'done',
                     cleaned_transcription TEXT,
@@ -105,6 +105,17 @@ def _ensure_schema() -> None:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
+            )
+
+            conn.execute(
+                "ALTER TABLE transcripts DROP CONSTRAINT IF EXISTS transcripts_uniqueid_key"
+            )
+
+            # Older deployments may still have a standalone unique index.
+            conn.execute("DROP INDEX IF EXISTS transcripts_uniqueid_key")
+
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS transcripts_uniqueid_idx ON transcripts (uniqueid)"
             )
 
             conn.execute(
@@ -163,10 +174,10 @@ def validate_transcript_state(state: str) -> None:
 
 
 def upsert_transcript_progress(*, uniqueid: str) -> int:
-    """Ensure a transcript row exists and mark it as 'progress'. Returns transcript id.
+    """Create a transcript row in 'progress' state. Returns transcript id.
 
     This is used to represent a requested transcription before the Deepgram request
-    completes.
+    completes, even when multiple transcript rows share the same uniqueid.
     """
 
     validate_uniqueid(uniqueid)
@@ -177,10 +188,6 @@ def upsert_transcript_progress(*, uniqueid: str) -> int:
             """
             INSERT INTO transcripts (uniqueid, raw_transcription, state)
             VALUES (%s, %s, 'progress')
-            ON CONFLICT (uniqueid)
-            DO UPDATE SET
-                state = 'progress',
-                updated_at = now()
             RETURNING id
             """,
             (uniqueid, ""),
@@ -215,38 +222,55 @@ def set_transcript_state_by_uniqueid(*, uniqueid: str, state: str) -> None:
     with _connect() as conn:
         conn.execute(
             """
+            WITH latest_transcript AS (
+                SELECT id
+                FROM transcripts
+                WHERE uniqueid = %s
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+            )
             UPDATE transcripts
             SET state = %s,
                 updated_at = now()
-            WHERE uniqueid = %s
+            WHERE id IN (SELECT id FROM latest_transcript)
             """,
-            (state, uniqueid),
+            (uniqueid, state),
         )
 
 
 def upsert_transcript_raw(
     *,
+    transcript_id: Optional[int] = None,
     uniqueid: str,
     raw_transcription: str,
 ) -> int:
-    """Insert or update the raw transcript row and return its transcript id."""
+    """Persist the raw transcript row and return its transcript id."""
 
     validate_uniqueid(uniqueid)
     _ensure_schema()
 
     with _connect() as conn:
-        row = conn.execute(
-            """
-            INSERT INTO transcripts (uniqueid, raw_transcription)
-            VALUES (%s, %s)
-            ON CONFLICT (uniqueid)
-            DO UPDATE SET
-                raw_transcription = EXCLUDED.raw_transcription,
-                updated_at = now()
-            RETURNING id
-            """,
-            (uniqueid, raw_transcription),
-        ).fetchone()
+        if transcript_id is None:
+            row = conn.execute(
+                """
+                INSERT INTO transcripts (uniqueid, raw_transcription)
+                VALUES (%s, %s)
+                RETURNING id
+                """,
+                (uniqueid, raw_transcription),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                UPDATE transcripts
+                SET raw_transcription = %s,
+                    updated_at = now()
+                WHERE id = %s
+                  AND uniqueid = %s
+                RETURNING id
+                """,
+                (raw_transcription, transcript_id, uniqueid),
+            ).fetchone()
 
         if row is None:
             raise RuntimeError("Failed to upsert transcript")

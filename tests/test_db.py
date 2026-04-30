@@ -136,7 +136,29 @@ async def test_ensure_schema_hnsw_success_path(monkeypatch: pytest.MonkeyPatch):
 
     # Verify HNSW index attempt was made
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "uniqueid TEXT NOT NULL UNIQUE" not in executed_sql
+    assert "DROP CONSTRAINT IF EXISTS transcripts_uniqueid_key" in executed_sql
+    assert "CREATE INDEX IF NOT EXISTS transcripts_uniqueid_idx" in executed_sql
     assert "USING hnsw" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_upsert_transcript_progress_inserts_new_row(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(db, "_ensure_schema", lambda: None)
+
+    conn = _make_conn(fetchone_result=(51,))
+    monkeypatch.setattr(db, "_connect", MagicMock(return_value=conn))
+
+    transcript_id = await run_in_threadpool(
+        db.upsert_transcript_progress,
+        uniqueid="1234567890.1234",
+    )
+
+    assert transcript_id == 51
+
+    executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "INSERT INTO transcripts (uniqueid, raw_transcription, state)" in executed_sql
+    assert "ON CONFLICT" not in executed_sql
 
 
 @pytest.mark.asyncio
@@ -153,6 +175,32 @@ async def test_upsert_transcript_raw_returns_id(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert transcript_id == 42
+
+    executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "INSERT INTO transcripts (uniqueid, raw_transcription)" in executed_sql
+    assert "ON CONFLICT" not in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_upsert_transcript_raw_updates_existing_row_by_id(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(db, "_ensure_schema", lambda: None)
+
+    conn = _make_conn(fetchone_result=(42,))
+    monkeypatch.setattr(db, "_connect", MagicMock(return_value=conn))
+
+    transcript_id = await run_in_threadpool(
+        db.upsert_transcript_raw,
+        transcript_id=42,
+        uniqueid="1234567890.1234",
+        raw_transcription="hello",
+    )
+
+    assert transcript_id == 42
+
+    executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "UPDATE transcripts" in executed_sql
+    assert "WHERE id = %s" in executed_sql
+    assert "AND uniqueid = %s" in executed_sql
 
 
 @pytest.mark.asyncio
@@ -188,6 +236,24 @@ async def test_update_transcript_ai_fields_executes_update(monkeypatch: pytest.M
     # Ensure UPDATE statement was issued
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
     assert "UPDATE transcripts" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_set_transcript_state_by_uniqueid_updates_latest_row(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(db, "_ensure_schema", lambda: None)
+
+    conn = _make_conn()
+    monkeypatch.setattr(db, "_connect", MagicMock(return_value=conn))
+
+    await run_in_threadpool(
+        db.set_transcript_state_by_uniqueid,
+        uniqueid="1234567890.1234",
+        state="done",
+    )
+
+    executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "WITH latest_transcript AS" in executed_sql
+    assert "ORDER BY updated_at DESC, id DESC" in executed_sql
 
 
 @pytest.mark.asyncio
