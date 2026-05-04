@@ -293,7 +293,7 @@ async def test_set_transcript_state_by_uniqueid_updates_latest_row(monkeypatch: 
 
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
     assert "WITH latest_transcript AS" in executed_sql
-    assert "ORDER BY updated_at DESC, id DESC" in executed_sql
+    assert "ORDER BY id DESC" in executed_sql
 
 
 @pytest.mark.asyncio

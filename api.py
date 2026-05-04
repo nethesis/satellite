@@ -564,7 +564,10 @@ async def get_transcription(
         duration = metadata.get("duration", 0.0)
         paragraphs = results.get("paragraphs")
         paragraphs_transcript = paragraphs.get("transcript") if isinstance(paragraphs, dict) else None
-        if isinstance(paragraphs_transcript, str) and paragraphs_transcript.strip() == "" and duration == 0.0:
+        if duration == 0.0 and (
+            paragraphs_transcript is None
+            or (isinstance(paragraphs_transcript, str) and paragraphs_transcript.strip() == "")
+        ):
             logger.warning(
                 "Deepgram returned explicit empty transcription (duration=%.1f, uniqueid=%s); skipping empty audio",
                 duration,
