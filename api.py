@@ -557,20 +557,38 @@ async def get_transcription(
 
     result = response.json()
     detected_language = None  # always define; mocks may omit this field
-    channels = result.get("results", {}).get("channels")
+    results = result.get("results", {})
+    metadata = result.get("metadata", {})
+    channels = results.get("channels")
     if channels is not None and not channels:
-        duration = result.get("metadata", {}).get("duration", 0.0)
-        logger.warning(
-            "Deepgram returned no channels (duration=%.1f, uniqueid=%s); skipping empty audio",
+        duration = metadata.get("duration", 0.0)
+        paragraphs = results.get("paragraphs")
+        paragraphs_transcript = paragraphs.get("transcript") if isinstance(paragraphs, dict) else None
+        if isinstance(paragraphs_transcript, str) and paragraphs_transcript.strip() == "" and duration == 0.0:
+            logger.warning(
+                "Deepgram returned explicit empty transcription (duration=%.1f, uniqueid=%s); skipping empty audio",
+                duration,
+                uniqueid,
+            )
+            if transcript_id is not None:
+                try:
+                    await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="done")
+                except Exception:
+                    logger.exception("Failed to update transcript state=done after empty audio")
+            return {"transcript": "", "detected_language": None}
+
+        logger.error(
+            "Deepgram returned empty channels without explicit empty-audio indicators "
+            "(duration=%s, uniqueid=%s); treating response as invalid",
             duration,
             uniqueid,
         )
         if transcript_id is not None:
             try:
-                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="done")
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
             except Exception:
-                logger.exception("Failed to update transcript state=done after empty audio")
-        return {"transcript": "", "detected_language": None}
+                logger.exception("Failed to update transcript state=failed after invalid empty channels response")
+        raise HTTPException(status_code=502, detail="Invalid Deepgram response")
 
     try:
         if "paragraphs" in result["results"] and "transcript" in result["results"]["paragraphs"]:
