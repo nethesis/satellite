@@ -103,7 +103,7 @@ PGVECTOR_DATABASE=satellite
 If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` can persist the raw transcription to Postgres when the request includes `persist=true` and a valid `uniqueid`.
 
 The database schema is created automatically on first use and includes:
-- `transcripts`: stores `uniqueid`, optional `src_number` and `dst_number` participant numbers, diarized raw transcription (Deepgram paragraphs transcript), `state`, optional cleaned transcription + summary, and `sentiment` (0-10). `uniqueid` is indexed but not unique, so transferred calls can persist multiple fragments under the same Asterisk call identifier while Satellite tracks each stored fragment by its internal `id`.
+- `transcripts`: stores `uniqueid`, optional `linkedid`, and optional `src_number` and `dst_number` participant numbers, diarized raw transcription (Deepgram paragraphs transcript), `state`, optional cleaned transcription + summary, and `sentiment` (0-10). `uniqueid` is indexed but not unique, so transferred calls can persist multiple fragments under the same Asterisk call identifier while Satellite tracks each stored fragment by its internal `id`.
 - `transcript_chunks`: table for storing chunked `text-embedding-3-small` embeddings in a `vector(1536)` column for similarity search
 
 `transcripts.state` is DB-only and represents the processing lifecycle:
@@ -136,6 +136,7 @@ Optional fields (query string or multipart form fields):
 - `uniqueid`: Asterisk-style uniqueid like `1234567890.1234` (required only when `persist=true`)
 - `persist`: `true|false` (default `false`) — persist raw transcript to Postgres (requires `PGVECTOR_*` env vars)
 - `summary`: `true|false` (default `false`) — run AI enrichment (requires `OPENAI_API_KEY` and also `persist=true` so there is a DB record to update)
+- `linkedid`: optional linked Asterisk call id stored with the persisted transcript row when `persist=true`
 - `src_number`, `dst_number`: optional participant numbers stored with the persisted transcript row when `persist=true`
 - `channel0_name`, `channel1_name`: rename diarization labels in the returned transcript (replaces `Channel 0:` / `Channel 1:`)
 

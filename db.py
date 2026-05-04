@@ -94,6 +94,7 @@ def _ensure_schema() -> None:
                 CREATE TABLE IF NOT EXISTS transcripts (
                     id BIGSERIAL PRIMARY KEY,
                     uniqueid TEXT NOT NULL,
+                    linkedid TEXT,
                     src_number TEXT,
                     dst_number TEXT,
                     raw_transcription TEXT NOT NULL,
@@ -143,7 +144,7 @@ def _ensure_schema() -> None:
 
             # Idempotent migration: add participant tracking columns for
             # existing databases created before these fields existed.
-            for col in ("src_number", "dst_number"):
+            for col in ("linkedid", "src_number", "dst_number"):
                 col_exists = conn.execute(
                     """
                     SELECT 1
@@ -195,6 +196,7 @@ def validate_transcript_state(state: str) -> None:
 def upsert_transcript_progress(
     *,
     uniqueid: str,
+    linkedid: Optional[str] = None,
     src_number: Optional[str] = None,
     dst_number: Optional[str] = None,
 ) -> int:
@@ -210,11 +212,11 @@ def upsert_transcript_progress(
     with _connect() as conn:
         row = conn.execute(
             """
-            INSERT INTO transcripts (uniqueid, src_number, dst_number, raw_transcription, state)
-            VALUES (%s, %s, %s, %s, 'progress')
+            INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription, state)
+            VALUES (%s, %s, %s, %s, %s, 'progress')
             RETURNING id
             """,
-            (uniqueid, src_number, dst_number, ""),
+            (uniqueid, linkedid, src_number, dst_number, ""),
         ).fetchone()
 
         if row is None:
@@ -266,6 +268,7 @@ def upsert_transcript_raw(
     *,
     transcript_id: Optional[int] = None,
     uniqueid: str,
+    linkedid: Optional[str] = None,
     src_number: Optional[str] = None,
     dst_number: Optional[str] = None,
     raw_transcription: str,
@@ -279,17 +282,18 @@ def upsert_transcript_raw(
         if transcript_id is None:
             row = conn.execute(
                 """
-                INSERT INTO transcripts (uniqueid, src_number, dst_number, raw_transcription)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (uniqueid, src_number, dst_number, raw_transcription),
+                (uniqueid, linkedid, src_number, dst_number, raw_transcription),
             ).fetchone()
         else:
             row = conn.execute(
                 """
                 UPDATE transcripts
-                SET src_number = COALESCE(%s, src_number),
+                SET linkedid = COALESCE(%s, linkedid),
+                    src_number = COALESCE(%s, src_number),
                     dst_number = COALESCE(%s, dst_number),
                     raw_transcription = %s,
                     updated_at = now()
@@ -297,7 +301,7 @@ def upsert_transcript_raw(
                   AND uniqueid = %s
                 RETURNING id
                 """,
-                (src_number, dst_number, raw_transcription, transcript_id, uniqueid),
+                (linkedid, src_number, dst_number, raw_transcription, transcript_id, uniqueid),
             ).fetchone()
 
         if row is None:

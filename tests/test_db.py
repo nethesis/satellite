@@ -139,6 +139,7 @@ async def test_ensure_schema_hnsw_success_path(monkeypatch: pytest.MonkeyPatch):
     assert "uniqueid TEXT NOT NULL UNIQUE" not in executed_sql
     assert "DROP CONSTRAINT IF EXISTS transcripts_uniqueid_key" in executed_sql
     assert "CREATE INDEX IF NOT EXISTS transcripts_uniqueid_idx" in executed_sql
+    assert "linkedid TEXT" in executed_sql
     assert "src_number TEXT" in executed_sql
     assert "dst_number TEXT" in executed_sql
     assert "USING hnsw" in executed_sql
@@ -153,7 +154,7 @@ async def test_ensure_schema_adds_missing_participant_columns(monkeypatch: pytes
     def execute_side_effect(sql, params=None):
         sql_text = str(sql)
         cursor = MagicMock(name="cursor")
-        if "FROM information_schema.columns" in sql_text and params in (("src_number",), ("dst_number",)):
+        if "FROM information_schema.columns" in sql_text and params in (("linkedid",), ("src_number",), ("dst_number",)):
             cursor.fetchone.return_value = None
         else:
             cursor.fetchone.return_value = (1,)
@@ -165,6 +166,7 @@ async def test_ensure_schema_adds_missing_participant_columns(monkeypatch: pytes
     await run_in_threadpool(db._ensure_schema)
 
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "ALTER TABLE transcripts ADD COLUMN linkedid TEXT NULL" in executed_sql
     assert "ALTER TABLE transcripts ADD COLUMN src_number TEXT NULL" in executed_sql
     assert "ALTER TABLE transcripts ADD COLUMN dst_number TEXT NULL" in executed_sql
 
@@ -179,6 +181,7 @@ async def test_upsert_transcript_progress_inserts_new_row(monkeypatch: pytest.Mo
     transcript_id = await run_in_threadpool(
         db.upsert_transcript_progress,
         uniqueid="1234567890.1234",
+        linkedid="1234567890.1000",
         src_number="100",
         dst_number="200",
     )
@@ -186,7 +189,7 @@ async def test_upsert_transcript_progress_inserts_new_row(monkeypatch: pytest.Mo
     assert transcript_id == 51
 
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
-    assert "INSERT INTO transcripts (uniqueid, src_number, dst_number, raw_transcription, state)" in executed_sql
+    assert "INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription, state)" in executed_sql
     assert "ON CONFLICT" not in executed_sql
 
 
@@ -200,6 +203,7 @@ async def test_upsert_transcript_raw_returns_id(monkeypatch: pytest.MonkeyPatch)
     transcript_id = await run_in_threadpool(
         db.upsert_transcript_raw,
         uniqueid="1234567890.1234",
+        linkedid="1234567890.1000",
         src_number="100",
         dst_number="200",
         raw_transcription="hello",
@@ -208,7 +212,7 @@ async def test_upsert_transcript_raw_returns_id(monkeypatch: pytest.MonkeyPatch)
     assert transcript_id == 42
 
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
-    assert "INSERT INTO transcripts (uniqueid, src_number, dst_number, raw_transcription)" in executed_sql
+    assert "INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription)" in executed_sql
     assert "ON CONFLICT" not in executed_sql
 
 
@@ -223,6 +227,7 @@ async def test_upsert_transcript_raw_updates_existing_row_by_id(monkeypatch: pyt
         db.upsert_transcript_raw,
         transcript_id=42,
         uniqueid="1234567890.1234",
+        linkedid="1234567890.1000",
         src_number="100",
         raw_transcription="hello",
     )
@@ -231,6 +236,7 @@ async def test_upsert_transcript_raw_updates_existing_row_by_id(monkeypatch: pyt
 
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
     assert "UPDATE transcripts" in executed_sql
+    assert "linkedid = COALESCE(%s, linkedid)" in executed_sql
     assert "src_number = COALESCE(%s, src_number)" in executed_sql
     assert "dst_number = COALESCE(%s, dst_number)" in executed_sql
     assert "WHERE id = %s" in executed_sql

@@ -408,6 +408,7 @@ async def get_transcription(
     logger.debug(f"Params: {input_params}")
 
     uniqueid = (input_params.get("uniqueid") or "").strip()
+    linkedid = (input_params.get("linkedid") or "").strip() or None
     src_number = (input_params.get("src_number") or "").strip() or None
     dst_number = (input_params.get("dst_number") or "").strip() or None
     channel0_name = (input_params.get("channel0_name") or "").strip()
@@ -430,6 +431,7 @@ async def get_transcription(
             transcript_id = await run_in_threadpool(
                 db.upsert_transcript_progress,
                 uniqueid=uniqueid,
+                linkedid=linkedid,
                 src_number=src_number,
                 dst_number=dst_number,
             )
@@ -613,6 +615,7 @@ async def get_transcription(
                 db.upsert_transcript_raw,
                 transcript_id=transcript_id,
                 uniqueid=uniqueid,
+                linkedid=linkedid,
                 src_number=src_number,
                 dst_number=dst_number,
                 raw_transcription=raw_transcription,
