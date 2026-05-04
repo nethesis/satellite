@@ -589,7 +589,6 @@ async def get_transcription(
             except Exception:
                 logger.exception("Failed to update transcript state=failed after invalid empty channels response")
         raise HTTPException(status_code=502, detail="Invalid Deepgram response")
-
     try:
         if "paragraphs" in result["results"] and "transcript" in result["results"]["paragraphs"]:
             raw_transcription = result["results"]["paragraphs"]["transcript"].strip()

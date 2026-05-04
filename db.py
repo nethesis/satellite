@@ -158,7 +158,6 @@ def _ensure_schema() -> None:
                 if col_exists is None:
                     conn.execute(f"ALTER TABLE transcripts ADD COLUMN {col} TEXT NULL")
                     conn.commit()
-
             # "Modern" pgvector index: HNSW (if supported by server pgvector version)
             try:
                 # Run this in its own transaction so a failure doesn't leave the
