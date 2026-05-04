@@ -136,7 +136,61 @@ async def test_ensure_schema_hnsw_success_path(monkeypatch: pytest.MonkeyPatch):
 
     # Verify HNSW index attempt was made
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "uniqueid TEXT NOT NULL UNIQUE" not in executed_sql
+    assert "DROP CONSTRAINT IF EXISTS transcripts_uniqueid_key" in executed_sql
+    assert "CREATE INDEX IF NOT EXISTS transcripts_uniqueid_idx" in executed_sql
+    assert "linkedid TEXT" in executed_sql
+    assert "src_number TEXT" in executed_sql
+    assert "dst_number TEXT" in executed_sql
     assert "USING hnsw" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_ensure_schema_adds_missing_participant_columns(monkeypatch: pytest.MonkeyPatch):
+    conn = MagicMock(name="conn")
+    conn.__enter__.return_value = conn
+    conn.__exit__.return_value = False
+
+    def execute_side_effect(sql, params=None):
+        sql_text = str(sql)
+        cursor = MagicMock(name="cursor")
+        if "FROM information_schema.columns" in sql_text and params in (("linkedid",), ("src_number",), ("dst_number",)):
+            cursor.fetchone.return_value = None
+        else:
+            cursor.fetchone.return_value = (1,)
+        return cursor
+
+    conn.execute.side_effect = execute_side_effect
+    monkeypatch.setattr(db, "_connect_without_pgvector", MagicMock(return_value=conn))
+
+    await run_in_threadpool(db._ensure_schema)
+
+    executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "ALTER TABLE transcripts ADD COLUMN linkedid TEXT NULL" in executed_sql
+    assert "ALTER TABLE transcripts ADD COLUMN src_number TEXT NULL" in executed_sql
+    assert "ALTER TABLE transcripts ADD COLUMN dst_number TEXT NULL" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_upsert_transcript_progress_inserts_new_row(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(db, "_ensure_schema", lambda: None)
+
+    conn = _make_conn(fetchone_result=(51,))
+    monkeypatch.setattr(db, "_connect", MagicMock(return_value=conn))
+
+    transcript_id = await run_in_threadpool(
+        db.upsert_transcript_progress,
+        uniqueid="1234567890.1234",
+        linkedid="1234567890.1000",
+        src_number="100",
+        dst_number="200",
+    )
+
+    assert transcript_id == 51
+
+    executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription, state)" in executed_sql
+    assert "ON CONFLICT" not in executed_sql
 
 
 @pytest.mark.asyncio
@@ -149,10 +203,44 @@ async def test_upsert_transcript_raw_returns_id(monkeypatch: pytest.MonkeyPatch)
     transcript_id = await run_in_threadpool(
         db.upsert_transcript_raw,
         uniqueid="1234567890.1234",
+        linkedid="1234567890.1000",
+        src_number="100",
+        dst_number="200",
         raw_transcription="hello",
     )
 
     assert transcript_id == 42
+
+    executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription)" in executed_sql
+    assert "ON CONFLICT" not in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_upsert_transcript_raw_updates_existing_row_by_id(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(db, "_ensure_schema", lambda: None)
+
+    conn = _make_conn(fetchone_result=(42,))
+    monkeypatch.setattr(db, "_connect", MagicMock(return_value=conn))
+
+    transcript_id = await run_in_threadpool(
+        db.upsert_transcript_raw,
+        transcript_id=42,
+        uniqueid="1234567890.1234",
+        linkedid="1234567890.1000",
+        src_number="100",
+        raw_transcription="hello",
+    )
+
+    assert transcript_id == 42
+
+    executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "UPDATE transcripts" in executed_sql
+    assert "linkedid = COALESCE(%s, linkedid)" in executed_sql
+    assert "src_number = COALESCE(%s, src_number)" in executed_sql
+    assert "dst_number = COALESCE(%s, dst_number)" in executed_sql
+    assert "WHERE id = %s" in executed_sql
+    assert "AND uniqueid = %s" in executed_sql
 
 
 @pytest.mark.asyncio
@@ -188,6 +276,24 @@ async def test_update_transcript_ai_fields_executes_update(monkeypatch: pytest.M
     # Ensure UPDATE statement was issued
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
     assert "UPDATE transcripts" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_set_transcript_state_by_uniqueid_updates_latest_row(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(db, "_ensure_schema", lambda: None)
+
+    conn = _make_conn()
+    monkeypatch.setattr(db, "_connect", MagicMock(return_value=conn))
+
+    await run_in_threadpool(
+        db.set_transcript_state_by_uniqueid,
+        uniqueid="1234567890.1234",
+        state="done",
+    )
+
+    executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+    assert "WITH latest_transcript AS" in executed_sql
+    assert "ORDER BY id DESC" in executed_sql
 
 
 @pytest.mark.asyncio
