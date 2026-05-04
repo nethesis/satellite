@@ -252,7 +252,7 @@ def set_transcript_state_by_uniqueid(*, uniqueid: str, state: str) -> None:
                 SELECT id
                 FROM transcripts
                 WHERE uniqueid = %s
-                ORDER BY updated_at DESC, id DESC
+                ORDER BY id DESC
                 LIMIT 1
             )
             UPDATE transcripts
