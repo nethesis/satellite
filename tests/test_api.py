@@ -188,7 +188,7 @@ class TestGetTranscription:
 
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
              patch("api.db.is_configured", return_value=True), \
-             patch("api.db.upsert_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.create_transcript_progress", return_value=123) as progress_mock, \
              patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
              patch("api.db.set_transcript_state") as state_mock, \
              patch("api.run_in_threadpool", new=fake_run_in_threadpool):
@@ -244,7 +244,7 @@ class TestGetTranscription:
 
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
              patch("api.db.is_configured", return_value=True), \
-             patch("api.db.upsert_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.create_transcript_progress", return_value=123) as progress_mock, \
              patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
              patch("api.db.set_transcript_state") as state_mock, \
              patch("api.run_in_threadpool", new=fake_run_in_threadpool):
@@ -305,7 +305,7 @@ class TestGetTranscription:
 
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
              patch("api.db.is_configured", return_value=True), \
-             patch("api.db.upsert_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.create_transcript_progress", return_value=123) as progress_mock, \
              patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
              patch("api.db.set_transcript_state") as state_mock, \
              patch("api.run_in_threadpool", new=fake_run_in_threadpool):
@@ -440,7 +440,7 @@ class TestGetTranscription:
             return func(*args, **kwargs)
 
         with patch("api.db.is_configured", return_value=True), \
-             patch("api.db.upsert_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.create_transcript_progress", return_value=123) as progress_mock, \
              patch("api.db.set_transcript_state") as state_mock, \
              patch("api.run_in_threadpool", new=fake_run_in_threadpool):
             response = client.post(

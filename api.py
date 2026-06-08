@@ -429,7 +429,7 @@ async def get_transcription(
         # Create a DB row immediately so we can track state even if Deepgram fails.
         try:
             transcript_id = await run_in_threadpool(
-                db.upsert_transcript_progress,
+                db.create_transcript_progress,
                 uniqueid=uniqueid,
                 linkedid=linkedid,
                 src_number=src_number,

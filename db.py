@@ -192,7 +192,7 @@ def validate_transcript_state(state: str) -> None:
         raise ValueError(f"Invalid transcript state {state!r}; expected one of {', '.join(TRANSCRIPT_STATES)}")
 
 
-def upsert_transcript_progress(
+def create_transcript_progress(
     *,
     uniqueid: str,
     linkedid: Optional[str] = None,

@@ -172,14 +172,14 @@ async def test_ensure_schema_adds_missing_participant_columns(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_upsert_transcript_progress_inserts_new_row(monkeypatch: pytest.MonkeyPatch):
+async def test_create_transcript_progress_inserts_new_row(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(db, "_ensure_schema", lambda: None)
 
     conn = _make_conn(fetchone_result=(51,))
     monkeypatch.setattr(db, "_connect", MagicMock(return_value=conn))
 
     transcript_id = await run_in_threadpool(
-        db.upsert_transcript_progress,
+        db.create_transcript_progress,
         uniqueid="1234567890.1234",
         linkedid="1234567890.1000",
         src_number="100",
