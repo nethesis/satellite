@@ -188,7 +188,7 @@ class TestGetTranscription:
 
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
              patch("api.db.is_configured", return_value=True), \
-             patch("api.db.upsert_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.create_transcript_progress", return_value=123) as progress_mock, \
              patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
              patch("api.db.set_transcript_state") as state_mock, \
              patch("api.run_in_threadpool", new=fake_run_in_threadpool):
@@ -200,9 +200,141 @@ class TestGetTranscription:
 
         assert response.status_code == 200
 
-        progress_mock.assert_called_once_with(uniqueid="1234567890.1234")
-        upsert_mock.assert_called_once_with(
+        progress_mock.assert_called_once_with(
             uniqueid="1234567890.1234",
+            linkedid=None,
+            src_number=None,
+            dst_number=None,
+        )
+        upsert_mock.assert_called_once_with(
+            transcript_id=123,
+            uniqueid="1234567890.1234",
+            linkedid=None,
+            src_number=None,
+            dst_number=None,
+            raw_transcription="SPEAKER 1: Hello world",
+        )
+        state_mock.assert_any_call(transcript_id=123, state="done")
+
+    @patch('httpx.AsyncClient')
+    def test_persists_linkedid_when_provided(self, mock_client_class, client, valid_wav_content):
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "results": {
+                "paragraphs": {"transcript": "SPEAKER 1: Hello world"},
+                "channels": [
+                    {
+                        "alternatives": [
+                            {"transcript": "Hello world"}
+                        ]
+                    }
+                ]
+            }
+        }
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        async def fake_run_in_threadpool(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
+             patch("api.db.is_configured", return_value=True), \
+             patch("api.db.create_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
+             patch("api.db.set_transcript_state") as state_mock, \
+             patch("api.run_in_threadpool", new=fake_run_in_threadpool):
+            response = client.post(
+                "/api/get_transcription",
+                files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+                data={
+                    "uniqueid": "1234567890.1234",
+                    "linkedid": "1234567890.1000",
+                    "persist": "true",
+                    "multichannel": "true",
+                },
+            )
+
+        assert response.status_code == 200
+
+        progress_mock.assert_called_once_with(
+            uniqueid="1234567890.1234",
+            linkedid="1234567890.1000",
+            src_number=None,
+            dst_number=None,
+        )
+        upsert_mock.assert_called_once_with(
+            transcript_id=123,
+            uniqueid="1234567890.1234",
+            linkedid="1234567890.1000",
+            src_number=None,
+            dst_number=None,
+            raw_transcription="SPEAKER 1: Hello world",
+        )
+        state_mock.assert_any_call(transcript_id=123, state="done")
+
+    @patch('httpx.AsyncClient')
+    def test_persists_src_and_dst_numbers_when_provided(self, mock_client_class, client, valid_wav_content):
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "results": {
+                "paragraphs": {"transcript": "SPEAKER 1: Hello world"},
+                "channels": [
+                    {
+                        "alternatives": [
+                            {"transcript": "Hello world"}
+                        ]
+                    }
+                ]
+            }
+        }
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        async def fake_run_in_threadpool(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
+             patch("api.db.is_configured", return_value=True), \
+             patch("api.db.create_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
+             patch("api.db.set_transcript_state") as state_mock, \
+             patch("api.run_in_threadpool", new=fake_run_in_threadpool):
+            response = client.post(
+                "/api/get_transcription",
+                files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+                data={
+                    "uniqueid": "1234567890.1234",
+                    "src_number": "+390111111111",
+                    "dst_number": "+390222222222",
+                    "persist": "true",
+                    "multichannel": "true",
+                },
+            )
+
+        assert response.status_code == 200
+
+        progress_mock.assert_called_once_with(
+            uniqueid="1234567890.1234",
+            linkedid=None,
+            src_number="+390111111111",
+            dst_number="+390222222222",
+        )
+        upsert_mock.assert_called_once_with(
+            transcript_id=123,
+            uniqueid="1234567890.1234",
+            linkedid=None,
+            src_number="+390111111111",
+            dst_number="+390222222222",
             raw_transcription="SPEAKER 1: Hello world",
         )
         state_mock.assert_any_call(transcript_id=123, state="done")
@@ -288,6 +420,44 @@ class TestGetTranscription:
 
         assert response.status_code == 500
         assert "Failed to parse transcription response" in response.json()["detail"]
+
+    @patch('httpx.AsyncClient')
+    def test_silent_audio_marks_persisted_transcript_done_and_returns_200(self, mock_client_class, client, valid_wav_content):
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "metadata": {"duration": 0.0, "channels": 0},
+            "results": {"channels": []},
+        }
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        async def fake_run_in_threadpool(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("api.db.is_configured", return_value=True), \
+             patch("api.db.create_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.set_transcript_state") as state_mock, \
+             patch("api.run_in_threadpool", new=fake_run_in_threadpool):
+            response = client.post(
+                "/api/get_transcription",
+                files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+                data={"uniqueid": "1234567890.1234", "persist": "true"},
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {"transcript": "", "detected_language": None}
+        progress_mock.assert_called_once_with(
+            uniqueid="1234567890.1234",
+            linkedid=None,
+            src_number=None,
+            dst_number=None,
+        )
+        state_mock.assert_called_once_with(transcript_id=123, state="done")
 
     @patch('httpx.AsyncClient')
     def test_missing_paragraphs_transcript_is_error(self, mock_client_class, client, valid_wav_content):

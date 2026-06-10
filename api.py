@@ -408,6 +408,9 @@ async def get_transcription(
     logger.debug(f"Params: {input_params}")
 
     uniqueid = (input_params.get("uniqueid") or "").strip()
+    linkedid = (input_params.get("linkedid") or "").strip() or None
+    src_number = (input_params.get("src_number") or "").strip() or None
+    dst_number = (input_params.get("dst_number") or "").strip() or None
     channel0_name = (input_params.get("channel0_name") or "").strip()
     channel1_name = (input_params.get("channel1_name") or "").strip()
     # Persist only when explicitly requested.
@@ -423,11 +426,14 @@ async def get_transcription(
 
     transcript_id = None
     if db.is_configured() and persist:
-        # Create/mark a DB row immediately so we can track state even if Deepgram fails.
+        # Create a DB row immediately so we can track state even if Deepgram fails.
         try:
             transcript_id = await run_in_threadpool(
-                db.upsert_transcript_progress,
+                db.create_transcript_progress,
                 uniqueid=uniqueid,
+                linkedid=linkedid,
+                src_number=src_number,
+                dst_number=dst_number,
             )
         except Exception:
             logger.exception("Failed to initialize transcript row for state tracking")
@@ -551,6 +557,41 @@ async def get_transcription(
 
     result = response.json()
     detected_language = None  # always define; mocks may omit this field
+    results = result.get("results", {})
+    metadata = result.get("metadata", {})
+    channels = results.get("channels")
+    if channels is not None and not channels:
+        duration = metadata.get("duration", 0.0)
+        paragraphs = results.get("paragraphs")
+        paragraphs_transcript = paragraphs.get("transcript") if isinstance(paragraphs, dict) else None
+        if duration == 0.0 and (
+            paragraphs_transcript is None
+            or (isinstance(paragraphs_transcript, str) and paragraphs_transcript.strip() == "")
+        ):
+            logger.warning(
+                "Deepgram returned explicit empty transcription (duration=%.1f, uniqueid=%s); skipping empty audio",
+                duration,
+                uniqueid,
+            )
+            if transcript_id is not None:
+                try:
+                    await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="done")
+                except Exception:
+                    logger.exception("Failed to update transcript state=done after empty audio")
+            return {"transcript": "", "detected_language": None}
+
+        logger.error(
+            "Deepgram returned empty channels without explicit empty-audio indicators "
+            "(duration=%s, uniqueid=%s); treating response as invalid",
+            duration,
+            uniqueid,
+        )
+        if transcript_id is not None:
+            try:
+                await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
+            except Exception:
+                logger.exception("Failed to update transcript state=failed after invalid empty channels response")
+        raise HTTPException(status_code=502, detail="Invalid Deepgram response")
     try:
         if "paragraphs" in result["results"] and "transcript" in result["results"]["paragraphs"]:
             raw_transcription = result["results"]["paragraphs"]["transcript"].strip()
@@ -592,7 +633,11 @@ async def get_transcription(
         try:
             transcript_id = await run_in_threadpool(
                 db.upsert_transcript_raw,
+                transcript_id=transcript_id,
                 uniqueid=uniqueid,
+                linkedid=linkedid,
+                src_number=src_number,
+                dst_number=dst_number,
                 raw_transcription=raw_transcription,
             )
         except ValueError as e:
