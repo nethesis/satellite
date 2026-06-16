@@ -189,7 +189,7 @@ async def test_create_transcript_progress_inserts_new_row(monkeypatch: pytest.Mo
     assert transcript_id == 51
 
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
-    assert "INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription, state)" in executed_sql
+    assert "INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, duration_seconds, raw_transcription, state)" in executed_sql
     assert "ON CONFLICT" not in executed_sql
 
 
@@ -212,7 +212,7 @@ async def test_upsert_transcript_raw_returns_id(monkeypatch: pytest.MonkeyPatch)
     assert transcript_id == 42
 
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
-    assert "INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription)" in executed_sql
+    assert "INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, duration_seconds, raw_transcription)" in executed_sql
     assert "ON CONFLICT" not in executed_sql
 
 
