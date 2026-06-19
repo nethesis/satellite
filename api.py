@@ -411,6 +411,13 @@ async def get_transcription(
     linkedid = (input_params.get("linkedid") or "").strip() or None
     src_number = (input_params.get("src_number") or "").strip() or None
     dst_number = (input_params.get("dst_number") or "").strip() or None
+    duration_raw = (input_params.get("duration") or "").strip()
+    try:
+        duration_seconds = int(duration_raw) if duration_raw else None
+        if duration_seconds is not None and duration_seconds < 0:
+            duration_seconds = None
+    except ValueError:
+        duration_seconds = None
     channel0_name = (input_params.get("channel0_name") or "").strip()
     channel1_name = (input_params.get("channel1_name") or "").strip()
     # Persist only when explicitly requested.
@@ -434,6 +441,7 @@ async def get_transcription(
                 linkedid=linkedid,
                 src_number=src_number,
                 dst_number=dst_number,
+                duration_seconds=duration_seconds,
             )
         except Exception:
             logger.exception("Failed to initialize transcript row for state tracking")
@@ -638,6 +646,7 @@ async def get_transcription(
                 linkedid=linkedid,
                 src_number=src_number,
                 dst_number=dst_number,
+                duration_seconds=duration_seconds,
                 raw_transcription=raw_transcription,
             )
         except ValueError as e:

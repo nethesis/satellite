@@ -97,6 +97,7 @@ def _ensure_schema() -> None:
                     linkedid TEXT,
                     src_number TEXT,
                     dst_number TEXT,
+                    duration_seconds INTEGER,
                     raw_transcription TEXT NOT NULL,
                     state TEXT NOT NULL DEFAULT 'done',
                     cleaned_transcription TEXT,
@@ -158,6 +159,21 @@ def _ensure_schema() -> None:
                 if col_exists is None:
                     conn.execute(f"ALTER TABLE transcripts ADD COLUMN {col} TEXT NULL")
                     conn.commit()
+
+            # Idempotent migration: per-segment conversation duration (seconds),
+            # used by the UI to show transfer sub-legs with a real duration.
+            duration_exists = conn.execute(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'transcripts'
+                  AND column_name = 'duration_seconds'
+                """,
+            ).fetchone()
+            if duration_exists is None:
+                conn.execute("ALTER TABLE transcripts ADD COLUMN duration_seconds INTEGER NULL")
+                conn.commit()
             # "Modern" pgvector index: HNSW (if supported by server pgvector version)
             try:
                 # Run this in its own transaction so a failure doesn't leave the
@@ -198,6 +214,7 @@ def create_transcript_progress(
     linkedid: Optional[str] = None,
     src_number: Optional[str] = None,
     dst_number: Optional[str] = None,
+    duration_seconds: Optional[int] = None,
 ) -> int:
     """Create a transcript row in 'progress' state. Returns transcript id.
 
@@ -211,11 +228,11 @@ def create_transcript_progress(
     with _connect() as conn:
         row = conn.execute(
             """
-            INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription, state)
-            VALUES (%s, %s, %s, %s, %s, 'progress')
+            INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, duration_seconds, raw_transcription, state)
+            VALUES (%s, %s, %s, %s, %s, %s, 'progress')
             RETURNING id
             """,
-            (uniqueid, linkedid, src_number, dst_number, ""),
+            (uniqueid, linkedid, src_number, dst_number, duration_seconds, ""),
         ).fetchone()
 
         if row is None:
@@ -270,6 +287,7 @@ def upsert_transcript_raw(
     linkedid: Optional[str] = None,
     src_number: Optional[str] = None,
     dst_number: Optional[str] = None,
+    duration_seconds: Optional[int] = None,
     raw_transcription: str,
 ) -> int:
     """Persist the raw transcript row and return its transcript id."""
@@ -281,11 +299,11 @@ def upsert_transcript_raw(
         if transcript_id is None:
             row = conn.execute(
                 """
-                INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, raw_transcription)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO transcripts (uniqueid, linkedid, src_number, dst_number, duration_seconds, raw_transcription)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (uniqueid, linkedid, src_number, dst_number, raw_transcription),
+                (uniqueid, linkedid, src_number, dst_number, duration_seconds, raw_transcription),
             ).fetchone()
         else:
             row = conn.execute(
@@ -294,13 +312,14 @@ def upsert_transcript_raw(
                 SET linkedid = COALESCE(%s, linkedid),
                     src_number = COALESCE(%s, src_number),
                     dst_number = COALESCE(%s, dst_number),
+                    duration_seconds = COALESCE(%s, duration_seconds),
                     raw_transcription = %s,
                     updated_at = now()
                 WHERE id = %s
                   AND uniqueid = %s
                 RETURNING id
                 """,
-                (linkedid, src_number, dst_number, raw_transcription, transcript_id, uniqueid),
+                (linkedid, src_number, dst_number, duration_seconds, raw_transcription, transcript_id, uniqueid),
             ).fetchone()
 
         if row is None:

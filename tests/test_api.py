@@ -205,6 +205,7 @@ class TestGetTranscription:
             linkedid=None,
             src_number=None,
             dst_number=None,
+            duration_seconds=None,
         )
         upsert_mock.assert_called_once_with(
             transcript_id=123,
@@ -212,9 +213,47 @@ class TestGetTranscription:
             linkedid=None,
             src_number=None,
             dst_number=None,
+            duration_seconds=None,
             raw_transcription="SPEAKER 1: Hello world",
         )
         state_mock.assert_any_call(transcript_id=123, state="done")
+
+    @patch('httpx.AsyncClient')
+    def test_persists_duration_when_provided(self, mock_client_class, client, valid_wav_content):
+        """The optional `duration` form field is parsed and forwarded to the db layer."""
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "results": {
+                "paragraphs": {"transcript": "SPEAKER 1: Hello world"},
+                "channels": [{"alternatives": [{"transcript": "Hello world"}]}],
+            }
+        }
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        async def fake_run_in_threadpool(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
+             patch("api.db.is_configured", return_value=True), \
+             patch("api.db.create_transcript_progress", return_value=123) as progress_mock, \
+             patch("api.db.upsert_transcript_raw", return_value=123) as upsert_mock, \
+             patch("api.db.set_transcript_state"), \
+             patch("api.run_in_threadpool", new=fake_run_in_threadpool):
+            response = client.post(
+                "/api/get_transcription",
+                files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+                data={"uniqueid": "1234567890.1234", "persist": "true", "duration": "24", "multichannel": "true"},
+            )
+
+        assert response.status_code == 200
+        assert progress_mock.call_args.kwargs["duration_seconds"] == 24
+        assert upsert_mock.call_args.kwargs["duration_seconds"] == 24
 
     @patch('httpx.AsyncClient')
     def test_persists_linkedid_when_provided(self, mock_client_class, client, valid_wav_content):
@@ -266,6 +305,7 @@ class TestGetTranscription:
             linkedid="1234567890.1000",
             src_number=None,
             dst_number=None,
+            duration_seconds=None,
         )
         upsert_mock.assert_called_once_with(
             transcript_id=123,
@@ -273,6 +313,7 @@ class TestGetTranscription:
             linkedid="1234567890.1000",
             src_number=None,
             dst_number=None,
+            duration_seconds=None,
             raw_transcription="SPEAKER 1: Hello world",
         )
         state_mock.assert_any_call(transcript_id=123, state="done")
@@ -328,6 +369,7 @@ class TestGetTranscription:
             linkedid=None,
             src_number="+390111111111",
             dst_number="+390222222222",
+            duration_seconds=None,
         )
         upsert_mock.assert_called_once_with(
             transcript_id=123,
@@ -335,6 +377,7 @@ class TestGetTranscription:
             linkedid=None,
             src_number="+390111111111",
             dst_number="+390222222222",
+            duration_seconds=None,
             raw_transcription="SPEAKER 1: Hello world",
         )
         state_mock.assert_any_call(transcript_id=123, state="done")
@@ -456,6 +499,7 @@ class TestGetTranscription:
             linkedid=None,
             src_number=None,
             dst_number=None,
+            duration_seconds=None,
         )
         state_mock.assert_called_once_with(transcript_id=123, state="done")
 
