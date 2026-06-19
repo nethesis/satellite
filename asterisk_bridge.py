@@ -63,6 +63,21 @@ class AsteriskBridge:
             return [call_id]
         return [cid for cid, cdata in self.channels.items() if cdata.get('linkedid') == call_id]
 
+    def _find_tracked_channel_id(self, related_channel_id):
+        """Resolve an original, snoop, or external media channel to the tracked call channel."""
+        if not related_channel_id:
+            return None
+        if related_channel_id in self.channels:
+            return related_channel_id
+
+        for channel_id, values in self.channels.items():
+            if values.get('snoop_channel_in') == related_channel_id or values.get('snoop_channel_out') == related_channel_id:
+                return channel_id
+            if values.get('external_media_channel_in') == related_channel_id or values.get('external_media_channel_out') == related_channel_id:
+                return channel_id
+
+        return None
+
     def _extract_call_start_epoch(self, linkedid):
         """
         Extract call start epoch seconds from linkedid (e.g. 1771864831.1430).
@@ -201,6 +216,66 @@ class AsteriskBridge:
             await self._handle_stasis_end(event)
         elif event_type == 'ChannelLeftBridge':
             await self._handle_channel_left_bridge(event)
+        elif event_type in ('BridgeBlindTransfer', 'BridgeAttendedTransfer'):
+            await self._handle_bridge_transfer(event)
+        elif event_type == 'ChannelTransfer':
+            await self._handle_channel_transfer(event)
+
+    async def _handle_bridge_transfer(self, event):
+        """Stop bridge resources after a completed blind or attended transfer."""
+        if str(event.get('result', '')).lower() != 'success':
+            return
+
+        for field_name in (
+            'channel',
+            'replace_channel',
+            'transferee',
+            'transferer_first_leg',
+            'transferer_second_leg',
+            'transfer_target',
+            'destination_link_first_leg',
+            'destination_link_second_leg',
+            'destination_threeway_channel',
+        ):
+            channel = event.get(field_name)
+            if not isinstance(channel, dict):
+                continue
+
+            tracked_channel_id = self._find_tracked_channel_id(channel.get('id'))
+            if tracked_channel_id is not None:
+                logger.info(f"{event.get('type', 'Transfer')} stopped transcription for channel {tracked_channel_id}")
+                await self.close_channel(tracked_channel_id)
+                return
+
+    async def _handle_channel_transfer(self, event):
+        """Stop bridge resources when an attended transfer request starts."""
+        refer_to = event.get('refer_to')
+        if not isinstance(refer_to, dict):
+            return
+
+        requested_destination = refer_to.get('requested_destination')
+        if not isinstance(requested_destination, dict) or not requested_destination.get('protocol_id'):
+            return
+
+        if str(event.get('state', '')).lower() == 'channel_declined':
+            return
+
+        referred_by = event.get('referred_by')
+        channel_candidates = (
+            referred_by.get('source_channel') if isinstance(referred_by, dict) else None,
+            referred_by.get('connected_channel') if isinstance(referred_by, dict) else None,
+            refer_to.get('destination_channel'),
+            refer_to.get('connected_channel'),
+        )
+        for channel in channel_candidates:
+            if not isinstance(channel, dict):
+                continue
+
+            tracked_channel_id = self._find_tracked_channel_id(channel.get('id'))
+            if tracked_channel_id is not None:
+                logger.info(f"Attended transfer started; stopped transcription for channel {tracked_channel_id}")
+                await self.close_channel(tracked_channel_id)
+                return
 
     async def _handle_stasis_start(self, event):
         """
