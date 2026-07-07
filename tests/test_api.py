@@ -42,6 +42,37 @@ def valid_wav_content():
     return wav_header
 
 
+class TestStartupSchemaInit:
+    """The Postgres schema must be created eagerly at startup, not lazily on
+    the first persisted transcript, so a fresh instance is immediately ready."""
+
+    def test_ensure_schema_called_when_configured(self, monkeypatch):
+        import db
+        from api import app
+
+        monkeypatch.setattr(db, "is_configured", lambda: True)
+        ensure_schema_mock = Mock()
+        monkeypatch.setattr(db, "ensure_schema", ensure_schema_mock)
+
+        with TestClient(app):
+            pass
+
+        ensure_schema_mock.assert_called_once()
+
+    def test_ensure_schema_skipped_when_not_configured(self, monkeypatch):
+        import db
+        from api import app
+
+        monkeypatch.setattr(db, "is_configured", lambda: False)
+        ensure_schema_mock = Mock()
+        monkeypatch.setattr(db, "ensure_schema", ensure_schema_mock)
+
+        with TestClient(app):
+            pass
+
+        ensure_schema_mock.assert_not_called()
+
+
 class TestGetTranscription:
     """Tests for the /api/get_transcription endpoint."""
 

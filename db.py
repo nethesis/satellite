@@ -72,6 +72,12 @@ def _connect_without_pgvector() -> psycopg.Connection:
     return psycopg.connect(_conninfo())
 
 
+def ensure_schema() -> None:
+    """Public entry point so callers can create the schema eagerly (e.g. at
+    process startup) instead of waiting for the first persisted transcript."""
+    _ensure_schema()
+
+
 def _ensure_schema() -> None:
     global _schema_initialized
     if _schema_initialized:

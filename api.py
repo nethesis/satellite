@@ -21,6 +21,20 @@ import db
 app = FastAPI()
 logger = logging.getLogger("api")
 
+
+@app.on_event("startup")
+def _init_satellite_db_schema() -> None:
+    # Create the Postgres schema as soon as the service starts, instead of
+    # waiting for the first successfully persisted transcript. Otherwise an
+    # idle/fresh instance has no "transcripts" table at all, and every read
+    # endpoint that queries it fails until one call is persisted.
+    if not db.is_configured():
+        return
+    try:
+        db.ensure_schema()
+    except Exception:
+        logger.exception("Failed to initialize satellite database schema at startup")
+
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")  # Ensure this environment variable is set
 
 DEEPGRAM_TTS_MODELS = [
