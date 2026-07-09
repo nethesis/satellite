@@ -126,6 +126,17 @@ async def test_ensure_schema_sets_initialized_and_is_idempotent(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
+async def test_public_ensure_schema_delegates_to_private_one(monkeypatch: pytest.MonkeyPatch):
+    conn = _make_conn(hnsw_raises=True)
+    connect_mock = MagicMock(return_value=conn)
+    monkeypatch.setattr(db, "_connect_without_pgvector", connect_mock)
+
+    await run_in_threadpool(db.ensure_schema)
+    assert db._schema_initialized is True
+    assert connect_mock.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_ensure_schema_hnsw_success_path(monkeypatch: pytest.MonkeyPatch):
     conn = _make_conn(hnsw_raises=False)
     connect_mock = MagicMock(return_value=conn)
