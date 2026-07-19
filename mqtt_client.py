@@ -118,8 +118,8 @@ class MQTTClient:
                 if hasattr(self, 'client') and self.client:
                     try:
                             await self.client.__aexit__(None, None, None)
-                    except:
-                            pass
+                    except Exception:
+                            logger.debug("Failed to close MQTT client during reconnect", exc_info=True)
                     self.client = None
                 await asyncio.sleep(self.reconnect_delay)
 
@@ -139,8 +139,8 @@ class MQTTClient:
         if self.client:
                 try:
                     await self.client.__aexit__(None, None, None)
-                except:
-                    pass
+                except Exception:
+                    logger.debug("Failed to close MQTT client during disconnect", exc_info=True)
                 self.client = None
 
         self.connected = False
