@@ -17,8 +17,8 @@ If OpenAI API key is provided, it will be used to generate a summary of the tran
 
 - Python 3.12+
 - Asterisk PBX with ARI enabled
-- MQTT broker
-- Deepgram API key
+- MQTT broker and Deepgram API key for optional transcription
+- Provider API key and signed webhook binding for built-in voice agents
 
 ## Installation
 
@@ -98,6 +98,17 @@ PGVECTOR_DATABASE=satellite
 #### Rest API Configuration
 - `HTTP_PORT`: Port for the HTTP server (default: 8000)
 - `API_TOKEN`: Optional static token for `/api/*` endpoints. If unset/empty, auth is disabled.
+
+#### Built-in Satellite Agent
+- `SATELLITE_AGENT_ARI_APP`: Separate Agent Stasis application (default: `satellite-agent`). The transcription application continues to use `ARI_APP`.
+- `SATELLITE_AGENT_STATE_PATH`: Optional persistent path for the accepted configuration revision and webhook receipt hashes. This file contains no provider credentials.
+- `API_TOKEN`: Required for `/api/agent/v1/*` and for built-in call readiness. The existing API retains its optional-token behavior.
+
+The built-in voice runtime runs in the same process and event loop as the HTTP API. It can run without `DEEPGRAM_API_KEY`; transcription and RTP/MQTT services remain optional. FreePBX sends complete versioned configuration to `PUT /api/agent/v1/configuration` and current directory/calendar data to `PUT /api/agent/v1/context`. Calls entering `Stasis(satellite-agent,caller,...)` are matched to a pinned destination and provider binding. The runtime originates a retained `Local/...@satellite-agent-provider/n` leg and bridges it after the signed provider event is correlated and both legs are ready.
+
+Build the runtime image with this Satellite source checkout as the container build context so the `agent/` package is included. The NS8 module repository consumes the resulting runtime image separately.
+
+Agent endpoints include `/readiness`, `/catalog/tools`, `/catalog/permissions`, `/provider-events/{openai|grok}`, and `/calls/{session_id}` control/status under `/api/agent/v1`. Provider events require the shared Bearer token and an independently valid provider webhook signature. The Agent API does not expose provider credentials. On setup failure the original caller returns to the generated FreePBX fallback; a committed basic handoff continues directly to a configured extension, queue, or IVR.
 
 #### Postgres Vectorstore Configuration
 If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` can persist the raw transcription to Postgres when the request includes `persist=true` and a valid `uniqueid`.

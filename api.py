@@ -714,3 +714,18 @@ async def get_transcription(
 
 
 app.include_router(api_router)
+
+
+# Agent sessions, locks and provider sockets all belong to FastAPI's event loop.
+from agent.runtime import AgentRuntime
+from agent.api import create_router
+agent_runtime = AgentRuntime()
+app.include_router(create_router(agent_runtime))
+
+@app.on_event("startup")
+async def _start_agent_runtime():
+    await agent_runtime.start()
+
+@app.on_event("shutdown")
+async def _stop_agent_runtime():
+    await agent_runtime.stop()

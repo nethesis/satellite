@@ -14,6 +14,7 @@ COPY requirements.txt /tmp/requirements.txt
 
 # Copy application files
 COPY *.py /tmp/
+COPY agent/ /tmp/agent/
 COPY README.md /tmp/
 
 # Install dependencies
@@ -36,6 +37,7 @@ COPY --from=builder /root/.local /root/.local
 
 # Copy application files
 COPY --from=builder /tmp/*.py /app/
+COPY --from=builder /tmp/agent/ /app/agent/
 COPY --from=builder /tmp/README.md /app/
 
 # Make sure scripts in .local are usable
