@@ -197,6 +197,14 @@ async def admit(setup):
     return next(iter(runtime.calls.values()))
 
 
+@run_async
+async def test_local_channel_ids_fit_freepbx_call_records(setup):
+    call = await admit(setup)
+    assert call.local_id.startswith("agent-")
+    assert len(call.local_id) == 30
+    assert len(call.local_id + ";2") <= 32
+
+
 def signed_event(call, *, session=None, leg=None, destination=None, flow=None):
     event = {"id": "evt-1", "type": "realtime.call.incoming", "data": {"call_id": "provider-1", "sip_headers": [
         {"name": name, "value": value} for name, value in {

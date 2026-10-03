@@ -291,7 +291,9 @@ class AgentRuntime:
             live_context = getattr(self.store, "live_context", None) or {}
             session_id = secrets.token_urlsafe(24)
             call = Call(session_id, secrets.token_urlsafe(24), secrets.token_urlsafe(24),
-                        f"agent-local-{secrets.token_hex(16)}", channel_id, destination_id,
+                        # FreePBX CDR/CEL IDs are VARCHAR(32). Asterisk adds
+                        # ';2' to the second Local half, so keep the base at 30.
+                        f"agent-{secrets.token_hex(12)}", channel_id, destination_id,
                         profile_key, profile, binding,
                         copy.deepcopy(live_context.get("directory", payload.get("directory", []))),
                         copy.deepcopy(live_context.get("calendars", payload.get("calendars", {}))),
