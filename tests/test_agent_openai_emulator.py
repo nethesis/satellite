@@ -17,7 +17,7 @@ from agent.providers.realtime import OpenAIAdapter
 from agent.prompt import execution_profile
 from agent.runtime import AgentRuntime, CallState
 from agent.tools import ToolRegistry
-from test_agent_voice import FakeAri, FakeStore, signed_event
+from tests.test_agent_voice import FakeAri, FakeStore, signed_event
 
 
 @pytest.fixture(autouse=True)

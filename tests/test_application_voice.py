@@ -2,7 +2,7 @@
 
 import asyncio
 
-from test_agent_voice import setup, run_async
+from tests.test_agent_voice import setup, run_async
 
 
 @run_async
