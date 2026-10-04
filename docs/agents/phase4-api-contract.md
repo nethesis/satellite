@@ -1,8 +1,8 @@
 # Phase 4 application API contract
 
 Source contract, 4 October 2026. Local implementation and fixture verification are
-recorded in [phase4-development.md](phase4-development.md) and
-[phase4-test-report.md](phase4-test-report.md). Business-service acceptance and
+recorded in [phase4-development.md](https://github.com/Nethesis/ns8-nethvoice/blob/agent/satellite/phase4-development.md) and
+[phase4-test-report.md](https://github.com/Nethesis/ns8-nethvoice/blob/agent/satellite/phase4-test-report.md). Business-service acceptance and
 live OpenAI validation remain open. API access starts disabled.
 
 ## Administrator setup
