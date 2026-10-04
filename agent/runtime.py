@@ -15,6 +15,7 @@ from agent.asterisk.controller import AriController
 from agent.configuration import ConfigurationStore
 from agent.context import allowed, tool_enabled, visible
 from agent.events import EventSink
+from agent.monitoring import Monitoring
 from agent.models import AgentUnavailable, InvalidInvocation, PermissionDenied
 from agent.providers import create_adapter
 from agent.providers.webhook import verify_webhook
@@ -60,6 +61,7 @@ class Call:
     deadline: float
     state: CallState = CallState.STARTING
     state_revision: int = 0
+    connector_tools: list = field(default_factory=list)
     provider_call_id: str | None = None
     provider_ready: bool = False
     local_answered: bool = False
@@ -86,12 +88,20 @@ class Call:
         return True
 
 
+from agent.application.service import Application
+from agent.prompt import execution_profile
+
+
 class AgentRuntime:
     def __init__(self, store=None, tools=None, events=None, controller=None,
-                 adapter_factory=None):
+                 adapter_factory=None, monitoring=None):
         self.store = store or ConfigurationStore()
         self.events = events or EventSink()
         self.tools = tools or ToolRegistry(self.events)
+        self.monitoring = monitoring or Monitoring()
+        self.events.observer = self.monitoring.event
+        self.application = Application(self)
+        self.tools.extensions = self.application
         self.adapter_factory = adapter_factory or create_adapter
         self.controller = controller or AriController(
             os.getenv("ASTERISK_URL", "http://localhost:8088"),
@@ -117,22 +127,40 @@ class AgentRuntime:
             return
         self._stopping = False
         self._started = True
+        await self.monitoring.start()
+        await self.application.start()
         await self.controller.start()
 
     async def stop(self):
         self._stopping = True
+        await self.application.stop()
         await asyncio.gather(*(self._finish(call, "shutdown", fallback=True)
                                for call in list(self.calls.values())), return_exceptions=True)
         await self.controller.stop()
         for task in list(self._tasks):
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        await self.monitoring.stop()
         self._started = False
 
     async def configure(self, envelope):
         # ConfigurationStore validates then swaps the complete snapshot. Calls
         # retain their private copies and old webhook secrets until they end.
-        return self.store.apply(envelope)
+        ack = self.store.apply(envelope)
+        await self.monitoring.configure(envelope["payload"].get("monitoring"))
+        for call in list(self.calls.values()):
+            if call.profile.get("_capture_transcripts") and (not self.monitoring.policy["transcripts"].get(call.profile_key) or
+                    call.profile.get("_capture_version") != self.monitoring.policy["capture_versions"].get(call.profile_key)):
+                call.profile["_capture_transcripts"] = False
+                if call.adapter and hasattr(call.adapter, "set_capture"):
+                    self._spawn(self._stop_capture(call.adapter))
+        return ack
+
+    async def _stop_capture(self, adapter):
+        try:
+            await asyncio.wait_for(adapter.set_capture(False), 2)
+        except Exception:
+            pass
 
     async def refresh_context(self, body):
         return self.store.refresh_context(body)
@@ -305,6 +333,15 @@ class AgentRuntime:
             self.calls[session_id] = call
             self.by_caller[channel_id] = session_id
             self.by_local[call.local_id] = session_id
+            self.monitoring.register(call)
+            self.events.emit("call_started", session_id=session_id, run_id=call.run_id,
+                             agent_id=profile_key, destination_id=destination_id)
+            try:
+                call.connector_tools = await asyncio.wait_for(self.application.voice_bindings(profile_key, origin), 0.5)
+            except (asyncio.TimeoutError, Exception):
+                call.connector_tools = []
+            if call.terminal:
+                return
             await self.controller.set_variable(channel_id, "AGENT_SESSION_ID", session_id)
             await self.controller.set_variable(channel_id, "AGENT_PROVIDER_LEG_ID", call.leg_id)
             await self.controller.set_variable(channel_id, "TIMEOUT(absolute)",
@@ -334,8 +371,6 @@ class AgentRuntime:
             inherited = {f"__{key}": value for key, value in inherited.items()}
             await asyncio.wait_for(self.controller.originate_local(session_id, call.local_id,
                                                                      inherited), SETUP_SECONDS)
-            self.events.emit("call_started", session_id=session_id, run_id=call.run_id,
-                             agent_id=profile_key, destination_id=destination_id)
         except (Exception, asyncio.CancelledError) as exc:
             self._error(f"Agent call admission failed: {type(exc).__name__}")
             existing = self.calls.get(locals().get("session_id"))
@@ -499,7 +534,7 @@ class AgentRuntime:
             call.adapter = adapter
             context = self._context(call)
             tools = self.tools.provider_tools(context)
-            await asyncio.wait_for(adapter.accept(call.provider_call_id, call.profile, tools), SETUP_SECONDS)
+            await asyncio.wait_for(adapter.accept(call.provider_call_id, execution_profile(call.profile, tools), tools), SETUP_SECONDS)
             await asyncio.wait_for(adapter.connect(call.provider_call_id), SETUP_SECONDS)
             if call.terminal:
                 await adapter.close()
@@ -521,6 +556,14 @@ class AgentRuntime:
                 kind = event.get("type")
                 if kind == "tool_call":
                     self._spawn(self._tool_call(call, event))
+                elif kind == "monitoring_gap":
+                    self.events.emit("monitoring_gap",run_id=call.run_id,error_code="provider_observation_gap")
+                elif kind == "transcript":
+                    self.monitoring.transcript(call, event)
+                elif kind in ("transcript_interrupted", "transcript_failed", "usage"):
+                    record = {k: v for k, v in event.items() if k != "type"}
+                    record["run_id"] = call.run_id
+                    self.monitoring.enqueue({"transcript_interrupted": "interruption", "transcript_failed": "text_error", "usage": "usage"}[kind], record)
                 elif kind in ("error", "closed"):
                     await self._finish(call, "provider_closed", fallback=call.state != CallState.CONVERSING)
                     break
@@ -532,6 +575,7 @@ class AgentRuntime:
     def _context(self, call):
         return {"run_id": call.run_id, "agent_id": call.profile_key,
                 "definition_revision": call.revision, "profile": call.profile,
+                "execution_kind": "voice", "connector_tools": call.connector_tools,
                 "permissions": call.permissions, "directory": call.directory,
                 "calendars": (getattr(self.store, "live_context", None) or {}).get("calendars", call.calendars),
                 "origin": call.origin,
@@ -749,7 +793,10 @@ class AgentRuntime:
         call.state_revision += 1
         self.events.emit("call_ended", session_id=call.session_id, run_id=call.run_id,
                          reason_code=reason, outcome="handed_off" if call.handed_off else
-                         ("fallback" if caller_action == "fallback" else "completed"))
+                         ("unknown" if call.handoff_attempt_id else
+                          "interrupted" if reason in ("shutdown", "ari_disconnected", "max_duration") else
+                          "fallback" if caller_action == "fallback" else
+                          "failed" if reason != "caller_hangup" else "completed"))
 
     async def _reconcile_orphans(self):
         try:

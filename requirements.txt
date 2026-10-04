@@ -17,3 +17,4 @@ uvicorn
 websockets>=11.0.3
 zstandard
 jsonschema==4.23.0
+cryptography==46.0.3

@@ -6,6 +6,8 @@ to the Agent runtime. See the providers' SIP and speech-to-speech documentation.
 
 import asyncio
 import json
+import os
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
 from urllib.parse import quote, urlencode
 
@@ -69,6 +71,8 @@ class _RealtimeAdapter:
         self._ws = None
         self._reader_task = None
         self._queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=256)
+        self._observation_queue = asyncio.Queue(maxsize=64)
+        self._event_ready = asyncio.Event()
         self._condition = asyncio.Condition()
         self._pending: set[str] = set()
         self._seen_calls: set[str] = set()
@@ -85,6 +89,14 @@ class _RealtimeAdapter:
         self._tools_config = []
         self._ready = asyncio.Event()
         self._session_configured = False
+        self._capture = False
+        self._items = OrderedDict()
+        self._item_sequence = 0
+        self._interrupted = set()
+        self._last_assistant_item = None
+        self._optional_updates = set()
+        self._observations_dropped = False
+        self._usage_responses = set()
 
     async def _client(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -157,15 +169,22 @@ class _RealtimeAdapter:
 
     async def events(self) -> AsyncIterator[dict]:
         while True:
-            event = await self._queue.get()
-            if event is None:
-                return
-            yield event
+            if not self._queue.empty():
+                event = self._queue.get_nowait()
+                if event is None:
+                    return
+                yield event
+            elif not self._observation_queue.empty():
+                yield self._observation_queue.get_nowait()
+            else:
+                self._event_ready.clear()
+                await self._event_ready.wait()
 
     async def _emit(self, event: dict) -> None:
         # A stalled consumer must not force unbounded memory growth.
         try:
             self._queue.put_nowait(event)
+            self._event_ready.set()
         except asyncio.QueueFull:
             raise ProviderError(f"{self.provider} event queue full")
 
@@ -196,16 +215,115 @@ class _RealtimeAdapter:
                 self._audio_playing = False
                 self._pending.clear()
                 self._condition.notify_all()
+            if not self._observation_queue.empty() and not self._queue.full():
+                self._queue.put_nowait({"type":"monitoring_gap"})
             for final_event in ({"type": "closed"}, None):
                 if self._queue.full():
                     self._queue.get_nowait()
                 self._queue.put_nowait(final_event)
+            self._event_ready.set()
+
+    async def _observation(self, value):
+        # Optional observations have a separate bounded queue. Tool and voice
+        # lifecycle events never compete with transcript buffers.
+        if self._observation_queue.full():
+            self._observations_dropped = True
+            return
+        if self._observations_dropped:
+            self._observation_queue.put_nowait({"type": "monitoring_gap"})
+            self._observations_dropped = False
+            if self._observation_queue.full():
+                self._observations_dropped = True
+                self._event_ready.set()
+                return
+        self._observation_queue.put_nowait(value)
+        self._event_ready.set()
+
+    def _position(self, item_id):
+        if item_id not in self._items:
+            self._item_sequence += 1
+            self._items[item_id] = self._item_sequence
+            if len(self._items) > 2048:
+                oldest, _ = self._items.popitem(last=False)
+                self._interrupted.discard(oldest)
+        return self._items[item_id]
+
+    async def set_capture(self, enabled):
+        self._capture = bool(enabled and self.provider == "openai")
+        if not self._capture:
+            retained=[]
+            while not self._observation_queue.empty():
+                value=self._observation_queue.get_nowait()
+                if value.get("type") not in ("transcript","transcript_interrupted"):
+                    retained.append(value)
+            for value in retained:
+                self._observation_queue.put_nowait(value)
+        if self.provider != "openai" or self._ws is None or self._ws.closed:
+            return
+        if len(self._optional_updates)>=8:
+            self._capture=False
+            return
+        update_id = "monitoring-" + str(len(self._optional_updates))
+        self._optional_updates.add(update_id)
+        try:
+            await self._send({"event_id": update_id, "type": "session.update", "session": {
+                "type": "realtime", "audio": {"input": {"transcription": {
+                    "model": os.getenv("SATELLITE_MONITORING_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
+                } if self._capture else None}}}})
+        except Exception:
+            self._capture = False
+            await self._observation({"type": "transcript_failed"})
+
+    async def _monitoring_event(self, raw):
+        kind = raw.get("type")
+        item = raw.get("item") or {}
+        item_id = raw.get("item_id") or item.get("id")
+        if isinstance(item_id, str) and 0 < len(item_id) <= 128 and kind in (
+                "conversation.item.added", "conversation.item.created", "input_audio_buffer.committed", "response.output_item.added"):
+            if item.get("role") == "assistant":
+                self._last_assistant_item = item_id
+            self._position(item_id)
+        if self._capture and kind in ("conversation.item.truncated", "output_audio_buffer.cleared"):
+            ids = [item_id] if item_id in self._items else ([self._last_assistant_item] if self._last_assistant_item else [])
+            for affected in ids:
+                self._interrupted.add(affected)
+                await self._observation({"type": "transcript_interrupted", "item_id": affected})
+        if self._capture and kind == "conversation.item.input_audio_transcription.failed":
+            await self._observation({"type": "transcript_failed"})
+        if self._capture and kind in ("conversation.item.input_audio_transcription.completed", "response.output_audio_transcript.done"):
+            text, index = raw.get("transcript"), raw.get("content_index", 0)
+            if isinstance(text, str) and isinstance(item_id, str) and 0 < len(item_id) <= 128 and type(index) is int and 0 <= index <= 100:
+                data = text.encode("utf-8")
+                await self._observation({"type": "transcript", "text": data[:16384].decode("utf-8", errors="ignore"),
+                    "truncated": len(data) > 16384, "item_id": item_id, "content_index": index,
+                    "role": "caller" if kind.startswith("conversation.") else "assistant",
+                    "position": self._position(item_id), "response_id": str(raw.get("response_id") or "")[:128],
+                    "interrupted": item_id in self._interrupted})
+        if kind == "response.done":
+            response = raw.get("response") or {}
+            response_id = response.get("id")
+            usage = response.get("usage")
+            if isinstance(response_id, str) and response_id not in self._usage_responses and isinstance(usage, dict) and len(self._usage_responses) < 4096:
+                clean = {key: value for key, value in usage.items() if key in ("total_tokens", "input_tokens", "output_tokens")
+                         and type(value) is int and 0 <= value <= 10**12}
+                if clean:
+                    self._usage_responses.add(response_id)
+                    clean["scope"] = "latest_provider_response"
+                    await self._observation({"type": "usage", "usage": clean})
 
     async def _handle(self, raw: dict) -> None:
         kind = raw.get("type")
+        try:
+            await self._monitoring_event(raw)
+        except Exception:
+            await self._observation({"type": "transcript_failed"})
         if kind == "session.updated":
             self._session_configured = True
             self._ready.set()
+        if kind == "error" and (raw.get("error") or {}).get("event_id") in self._optional_updates:
+            self._capture = False
+            await self._observation({"type": "transcript_failed"})
+            return
         if kind == "error":
             await self._emit({"type": "error", "code": "provider_event_error"})
         if kind == "response.created":
@@ -303,6 +421,8 @@ class OpenAIAdapter(_RealtimeAdapter):
         if call_id != self._call:
             raise ValueError("provider call mismatch")
         await self._connect(call_id)
+        if self._profile.get("_capture_transcripts"):
+            await self.set_capture(True)
 
 
 class GrokAdapter(_RealtimeAdapter):

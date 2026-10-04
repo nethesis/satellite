@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .monitoring.policy import validate_policy
 from .models import AgentUnavailable, InvalidConfiguration, RevisionConflict
 
 
@@ -105,6 +106,10 @@ def validate_payload(payload: Any) -> dict:
     p = _object(payload, "payload")
     if not {"profiles", "bindings", "destinations", "directory", "calendars"} <= p.keys():
         _invalid("incomplete snapshot")
+    try:
+        validate_policy(p.get("monitoring"))
+    except ValueError:
+        _invalid("invalid monitoring policy")
     profiles = _object(p["profiles"], "profiles")
     if set(profiles) != {"internal", "external"}:
         _invalid("both built-in profiles are required")

@@ -721,6 +721,11 @@ from agent.runtime import AgentRuntime
 from agent.api import create_router
 agent_runtime = AgentRuntime()
 app.include_router(create_router(agent_runtime))
+from agent.monitoring.api import create_monitoring_router
+app.include_router(create_monitoring_router(agent_runtime))
+from agent.application.api import create_application_routers
+for application_router in create_application_routers(agent_runtime.application):
+    app.include_router(application_router)
 
 @app.on_event("startup")
 async def _start_agent_runtime():

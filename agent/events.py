@@ -3,6 +3,7 @@
 import logging
 import threading
 import time
+import uuid
 from collections import deque
 
 
@@ -10,6 +11,9 @@ _SAFE_FIELDS = {
     "run_id", "session_id", "agent_id", "invocation_id", "tool_id",
     "provider", "state", "status", "outcome", "error_code", "duration_ms",
     "revision", "attempt_id", "binding_id", "destination_id", "reason_code",
+    "payload_hash", "runtime_epoch", "cdr_id",
+    "execution_kind", "client_id", "definition_revision", "grant_revision",
+    "operation_id", "effect_state", "retry_count", "actor",
 }
 
 
@@ -21,12 +25,13 @@ class EventSink:
         self._lock = threading.Lock()
         self._sequences: dict[str, int] = {}
         self.dropped_count = 0
+        self.observer = None
         self.logger = logger or logging.getLogger("agent.events")
 
     def emit(self, event_type: str, **fields) -> dict:
         """Never raise or expose dynamic payload text to logs/history."""
         try:
-            clean = {k: v[:128] if isinstance(v, str) else v
+            clean = {k: v[:128].encode("utf-8",errors="replace").decode("utf-8") if isinstance(v, str) else v
                      for k, v in fields.items() if k in _SAFE_FIELDS
                      and (isinstance(v, str) or type(v) in (int, float, bool))}
             run_id = clean.get("run_id")
@@ -37,10 +42,13 @@ class EventSink:
                     if len(self._sequences) > 2048:
                         self._sequences.pop(next(iter(self._sequences)))
                 event = {"schema_version": 1, "event_type": str(event_type)[:64],
-                         "timestamp": time.time(), "sequence": sequence, **clean}
+                         "timestamp": time.time(), "sequence": sequence, "event_id": uuid.uuid4().hex, **clean}
                 if len(self._events) == self._events.maxlen:
                     self.dropped_count += 1
                 self._events.append(event)
+            if self.observer is not None:
+                try: self.observer(event)
+                except Exception: pass
             try:
                 self.logger.info("agent event %s", event)
             except Exception:

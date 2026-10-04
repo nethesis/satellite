@@ -346,3 +346,34 @@ podman run -e ASTERISK_URL -e MQTT_URL -e DEEPGRAM_API_KEY ... satellite
 
 ## License
 This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for details.
+
+## Agent runtime on the `agent` branch
+
+The image `ghcr.io/nethesis/satellite:agent` includes voice agents, encrypted
+monitoring history, and configurable business connectors with an OpenAI Responses
+text executor. Existing transcription and MQTT interfaces remain compatible.
+See [monitoring API](docs/agents/monitoring-api-contract.md) and
+[application API](docs/agents/phase4-api-contract.md) for configuration, opt-in
+controls, permissions, scoped API clients, and deployment prerequisites.
+
+Enabled tools are appended to the effective provider instructions automatically.
+Call transfer includes only permitted, visible destinations with native extension
+display names, queue names and IVR names, plus configured descriptions and aliases.
+The model selects an approved destination ID; trusted PBX routing stays on the
+server. Disabling a tool or permission removes that capability from the prompt.
+
+### Offline OpenAI protocol tests
+
+Run `pytest tests/test_agent_openai_emulator.py`. The local aiohttp simulator
+emulates accept/hangup HTTP endpoints and the Realtime sideband WebSocket; signed
+`realtime.call.incoming` webhooks enter the real FastAPI route. Model tool answers
+arrive as `response.function_call_arguments.done` and `response.done` events.
+The suite tests all built-in functions, named extension/queue/IVR transfers,
+duplicate delivery, authentication, replay/correlation, denied capabilities,
+invalid requests, external permission limits and ARI transfer failures.
+It uses a fake ARI client and synthetic configuration; no SIP call, production
+credentials or OpenAI account is required.
+
+`test_application_acceptance.py` and `test_monitoring_acceptance.py` guard their
+storage tests with explicit isolated database host names and acceptance flags.
+Never point these destructive fixture tests at an existing database.
