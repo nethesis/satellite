@@ -6,6 +6,8 @@ import hashlib
 import math
 import os
 import time
+import threading
+import atexit
 
 import psycopg
 from psycopg.rows import dict_row
@@ -72,12 +74,28 @@ def decode_cursor(value, length):
         raise ValueError("invalid cursor") from exc
 
 
+_pools = {}
+_pool_lock = threading.Lock()
+
+@atexit.register
+def close_pools():
+    for pool in _pools.values():
+        pool.close()
+
+
 class HistoryRepository:
     def connect(self):
-        return psycopg.connect(host=os.getenv("PGVECTOR_HOST", "127.0.0.1"),
+        from psycopg_pool import ConnectionPool
+        config = dict(host=os.getenv("PGVECTOR_HOST", "127.0.0.1"),
             port=os.getenv("PGVECTOR_PORT", "5432"), dbname=os.getenv("PGVECTOR_DATABASE", "satellite"),
             user=os.getenv("PGVECTOR_USER", "satellite"), password=os.getenv("PGVECTOR_PASSWORD", ""),
             connect_timeout=2, options="-c statement_timeout=3000 -c lock_timeout=1000", row_factory=dict_row)
+        key = tuple(config.items())
+        with _pool_lock:
+            if key not in _pools:
+                _pools[key] = ConnectionPool(kwargs=config, min_size=0, max_size=8, timeout=2, open=True)
+            pool = _pools[key]
+        return pool.connection()
 
     def initialize(self, epoch):
         with self.connect() as db:
@@ -118,10 +136,15 @@ class HistoryRepository:
     def write(self, records, epoch, dropped):
         with self.connect() as db:
             policy = db.execute("SELECT value FROM agent_monitoring.policy WHERE id=1 FOR SHARE").fetchone()["value"]
-            size = db.execute("SELECT COALESCE(sum(pg_total_relation_size(c.oid)),0) AS bytes FROM pg_class c "
-                "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='agent_monitoring' AND c.relkind='r'").fetchone()["bytes"]
-            run_count = db.execute("SELECT count(*) AS n FROM agent_monitoring.runs").fetchone()["n"]
-            event_count = db.execute("SELECT count(*) AS n FROM agent_monitoring.events").fetchone()["n"]
+            cached = getattr(self, "_capacity", None)
+            if cached is None or time.monotonic() >= cached[0]:
+                size = db.execute("SELECT COALESCE(sum(pg_total_relation_size(c.oid)),0) AS bytes FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='agent_monitoring' AND c.relkind='r'").fetchone()["bytes"]
+                run_count = db.execute("SELECT count(*) AS n FROM agent_monitoring.runs").fetchone()["n"]
+                event_count = db.execute("SELECT count(*) AS n FROM agent_monitoring.events").fetchone()["n"]
+                refresh_at = time.monotonic()+30
+            else:
+                refresh_at, size, run_count, event_count = cached
             storage_full = size >= MAX_BYTES
             losses = 0
             deadline = time.monotonic()+4
@@ -218,9 +241,15 @@ class HistoryRepository:
             db.execute("INSERT INTO agent_monitoring.health(epoch,updated,complete,dropped,last_gap) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(epoch) "
                 "DO UPDATE SET updated=EXCLUDED.updated,complete=EXCLUDED.complete,dropped=EXCLUDED.dropped,last_gap=EXCLUDED.last_gap",
                 (epoch,now,not bool(dropped),dropped,last_gap))
+            self._capacity = (refresh_at, size + sum(len(str(record)) for record in records), run_count, event_count)
             return {"lost":losses,"dropped":dropped,"limit":storage_full or run_count >= MAX_RUNS or event_count >= MAX_EVENTS}
 
+    def audit_transcript_read(self, run_id, actor):
+        with self.connect() as db:
+            db.execute("INSERT INTO agent_monitoring.audit(timestamp,actor,action,run_id) VALUES(%s,%s,'transcript_read',%s)", (time.time(), actor, run_id))
+
     def purge(self):
+        self._capacity = None
         now = time.time()
         with self.connect() as db:
             policy = db.execute("SELECT value FROM agent_monitoring.policy WHERE id=1").fetchone()

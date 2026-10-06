@@ -78,8 +78,8 @@ an unknown run.
 
 Read paths and transcript deletion match the gateway under
 `/api/agent/v1/monitoring`. All require `Authorization: Bearer <API_TOKEN>`.
-Transcript deletion additionally requires `X-Monitoring-Actor`, populated from
-the verified administrator by the gateway. Policy is applied through the existing
+Transcript reads and deletion additionally require `X-Monitoring-Actor`, populated from
+the verified administrator by the gateway. Both operations write an audit record. Policy is applied through the existing
 revisioned configuration API, not a second runtime policy writer.
 
 `POST /api/agent/v1/monitoring/retention` triggers expiry cleanup. The NS8 timer

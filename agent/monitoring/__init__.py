@@ -136,6 +136,7 @@ class Monitoring:
 
     async def _writer(self):
         next_purge=0
+        next_heartbeat=0
         while not self._stopping or self._queue:
             try:
                 async with self._gate:
@@ -154,13 +155,19 @@ class Monitoring:
                     with self._queue_lock:
                         batch=list(self._queue)[:25]
                         dropped_baseline=self.dropped
-                    result=await asyncio.to_thread(self.repository.write,[x[0] for x in batch],self.epoch,dropped_baseline)
+                    if not batch and time.monotonic() < next_heartbeat:
+                        result = None
+                    else:
+                        result=await asyncio.to_thread(self.repository.write,[x[0] for x in batch],self.epoch,dropped_baseline)
+                        next_heartbeat=time.monotonic()+30
                     with self._queue_lock:
                         for _,size in batch:
                             self._queue.popleft();self._bytes-=size
-                        self.dropped+=max(0,result["dropped"]-dropped_baseline)
-                    self.last_write=time.time()
-                    self._error="monitoring_storage_limit" if result["limit"] else None
+                        if result is not None:
+                            self.dropped+=max(0,result["dropped"]-dropped_baseline)
+                    if result is not None:
+                        self.last_write=time.time()
+                        self._error="monitoring_storage_limit" if result["limit"] else None
             except Exception as exc:
                 code=str(exc)
                 self._error=code if code in ("monitoring_storage_limit","monitoring_run_limit","monitoring_event_limit") else "storage_unavailable"

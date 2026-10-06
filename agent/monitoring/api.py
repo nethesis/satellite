@@ -20,7 +20,7 @@ def create_monitoring_router(runtime):
     async def auth(request: Request):
         token=os.getenv("API_TOKEN","")
         supplied=request.headers.get("authorization","")
-        if not token or not hmac.compare_digest(supplied,"Bearer "+token):
+        if not token or not hmac.compare_digest(supplied.encode(),("Bearer "+token).encode()):
             raise HTTPException(401,"unauthorized")
 
     router=APIRouter(prefix="/api/agent/v1/monitoring",dependencies=[Depends(auth)])
@@ -102,9 +102,13 @@ def create_monitoring_router(runtime):
         return await read("events",run_id,limit,cursor)
 
     @router.get("/runs/{run_id}/transcript")
-    async def transcript(run_id:str,response:Response):
+    async def transcript(run_id:str,request:Request,response:Response):
         await run(run_id);response.headers["Cache-Control"]="no-store"
-        try: return await runtime.monitoring.conversation(run_id)
+        actor=request.headers.get("x-monitoring-actor","")
+        if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}",actor): raise HTTPException(400,"invalid_actor")
+        try:
+            await runtime.monitoring.read("audit_transcript_read", run_id, actor)
+            return await runtime.monitoring.conversation(run_id)
         except Exception: raise HTTPException(503,"transcript_unavailable") from None
 
     @router.delete("/runs/{run_id}/transcript")

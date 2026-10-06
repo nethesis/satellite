@@ -137,6 +137,7 @@ def mapped_request(operation, args):
     query = {target: args[source] for target, source in operation["query"].items() if source in args}
     if any(not isinstance(v, (str, int, float, bool)) or isinstance(v, (list, dict)) for v in query.values()):
         raise ApplicationError("invalid_input")
+    query = {key: ("true" if value else "false") if isinstance(value, bool) else value for key, value in query.items()}
     body = {target: args[source] for target, source in operation["body"].items() if source in args} if operation["method"] in ("POST", "PUT", "PATCH") else None
     return path, query, body
 

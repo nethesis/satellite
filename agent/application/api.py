@@ -184,7 +184,10 @@ def create_application_routers(application):
             value = await body(request)
             fields(value, ("client_id", "request", "idempotency_key", "confirm_write"))
             identifier(value["client_id"])
-            if type(value["confirm_write"]) is not bool or (value["request"].get("input", {}).get("action") == "create_ticket" and not value["confirm_write"]):
+            if not isinstance(value["request"], dict) or not isinstance(value["request"].get("input"), dict):
+                raise ApplicationError("invalid_request")
+            can_write = value["request"]["input"].get("action") == "create_ticket" or bool(value["request"].get("approved_actions"))
+            if type(value["confirm_write"]) is not bool or (can_write and not value["confirm_write"]):
                 raise ApplicationError("write_confirmation_required", 403)
             client = await application.db("client", value["client_id"])
             result = await application.submit(client, value["request"], value["idempotency_key"])

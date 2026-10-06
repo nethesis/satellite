@@ -156,32 +156,32 @@ class Application:
             raise ApplicationError("forbidden", 403)
         if request["input"]["action"] == "create_ticket":
             self.scope(client, "operations:write")
+        if not await self.db("enabled"):
+            raise ApplicationError("access_disabled", 503)
+        definition = await self.db("version", "preset", request["preset_id"], request["version"])
+        grants = await self.db("grants", request["preset_id"])
+        permitted = {reference_key(r) for r in grants["operations"]} & {reference_key(r) for r in client["definition"]["operations"]}
+        refs = [ref for ref in definition["operations"] if reference_key(ref) in permitted]
+        resolved = await self.db("resolve", refs)
+        if request["input"]["action"] == "lookup":
+            resolved = [item for item in resolved if item["operation"]["read_only"]]
+        if not resolved or (request["input"]["action"] == "create_ticket" and not any(not item["operation"]["read_only"] for item in resolved)):
+            raise ApplicationError("operation_denied", 403)
+        # The seeded preset's one write has exactly these server-approved fields.
+        for item in resolved:
+            op = item["operation"]
+            if not op["read_only"]:
+                expected = {"customer_id": request["input"]["customer_id"], "summary": request["input"]["summary"], "description": request["input"]["description"]}
+                if op["identity_field"] != "customer_id":
+                    raise ApplicationError("preset_operation_incompatible", 409)
+                validate(expected, op["input_schema"])
+        snapshot = {"preset": definition, "connectors": resolved, "grant_revision": grants["revision"]}
+        metadata = {"execution_kind": "api", "agent_id": "support-request", "provider": "openai",
+            "definition_revision": request["version"], "grant_revision": grants["revision"],
+            "connector_versions": refs, "native_revision": self.runtime.store.revision,
+            "native_payload_hash": self.runtime.store.payload_hash}
         async with self._submit_lock:
             self.limit_rate(client_id)
-            if not await self.db("enabled"):
-                raise ApplicationError("access_disabled", 503)
-            definition = await self.db("version", "preset", request["preset_id"], request["version"])
-            grants = await self.db("grants", request["preset_id"])
-            permitted = {reference_key(r) for r in grants["operations"]} & {reference_key(r) for r in client["definition"]["operations"]}
-            refs = [ref for ref in definition["operations"] if reference_key(ref) in permitted]
-            resolved = await self.db("resolve", refs)
-            if request["input"]["action"] == "lookup":
-                resolved = [item for item in resolved if item["operation"]["read_only"]]
-            if not resolved or (request["input"]["action"] == "create_ticket" and not any(not item["operation"]["read_only"] for item in resolved)):
-                raise ApplicationError("operation_denied", 403)
-            # The seeded preset's one write has exactly these server-approved fields.
-            for item in resolved:
-                op = item["operation"]
-                if not op["read_only"]:
-                    expected = {"customer_id": request["input"]["customer_id"], "summary": request["input"]["summary"], "description": request["input"]["description"]}
-                    if op["identity_field"] != "customer_id":
-                        raise ApplicationError("preset_operation_incompatible", 409)
-                    validate(expected, op["input_schema"])
-            snapshot = {"preset": definition, "connectors": resolved, "grant_revision": grants["revision"]}
-            metadata = {"execution_kind": "api", "agent_id": "support-request", "provider": "openai",
-                "definition_revision": request["version"], "grant_revision": grants["revision"],
-                "connector_versions": refs, "native_revision": self.runtime.store.revision,
-                "native_payload_hash": self.runtime.store.payload_hash}
             row, fresh = await self.db("admit", client_id, idempotency, request, snapshot, self.epoch,
                                        self.key, self.runtime.store.revision, metadata)
             if fresh:
@@ -240,7 +240,7 @@ class Application:
                         raise ApplicationError("execution_timeout", 503)
                 async def watch():
                     while not cancellation.is_set():
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(3)
                         try:
                             await check()
                         except ApplicationError:
@@ -482,7 +482,7 @@ class Application:
         slots = self._connector_slots.setdefault((ref["connector_id"], "api"), asyncio.Semaphore(1))
         async with asyncio.timeout(target["timeout_seconds"]):
             async with self._io_slots["api"], slots:
-                response = await self.transport.json_request(cfg["origin"], path, "GET", headers, query, None, cfg["private_networks"], target["timeout_seconds"])
+                response = await self.transport.json_request(cfg["origin"], path, target["method"], headers, query, body, cfg["private_networks"], target["timeout_seconds"])
         result = project(response, target)
         if result.get(spec["result_field"]):
             await self.db("settle_effect", operation_id, "committed", result, self.key)

@@ -29,7 +29,7 @@ requires the gateway's verified actor header; it is not published by Traefik.
    explicit authorized customer IDs. Copy its token once to the calling system.
    Revoking a client denies new requests and stops its active execution.
 6. Enable application access. Use an administrator test run to inspect the
-   integration. Ticket tests require an explicit write confirmation. They invoke
+   integration. Ticket tests and workflow tests with approved actions require explicit write confirmation. They invoke
    the real service and may create a real ticket when configured against it.
 
 Native voice profiles remain owned by FreePBX. Connector and preset resources,
@@ -39,13 +39,13 @@ grants, clients, effects and API results are owned by Satellite/PostgreSQL.
 
 Required connector keys are `name`, `origin`, `secret_ref`, `auth`,
 `private_networks`, and `operations`. `auth` is either `{"type":"bearer"}` or
-`{"type":"api_key","header":"X-Api-Key"}`. Credentials are resolved only
+`{"type":"api_key","header":"X-Api-Key"}` or `{"type":"basic_api_key"}` (API key as the Basic username with the Freshdesk password placeholder). Credentials are resolved only
 server-side. A connector is limited to 20 operations; at most 20 connectors exist.
 
 An operation declares `id`, `description`, `method`, `path`, `input_schema`,
 `output_schema`, `query`, `body`, `projection`, `read_only`, `public_voice`,
-`timeout_seconds`, and `identity_field`. Only GET/read-only and POST/write are
-supported. A fixed path can include URL-encoded input placeholders, such as
+`timeout_seconds`, and `identity_field`. GET, POST, PUT and PATCH are supported. GET is read-only; a POST, PUT or
+PATCH operation declares whether it is read-only or a write. A fixed path can include URL-encoded input placeholders, such as
 `/customers/{customer_id}`. Query/body mappings map remote field names to input
 property names. Projection maps exposed field names to remote dotted JSON paths;
 only projected, schema-validated data reaches the model or stored result.
@@ -85,7 +85,7 @@ actual deduplication contract before enabling writes.
 An optional write `reconcile` value has `operation`, `argument`, and
 `result_field`. It references a read-only operation in the same connector, accepts
 the original operation ID as its lookup argument, and exposes a receipt field.
-An administrator reconciliation only performs that GET; a truthy validated
+An administrator reconciliation uses that read-only operation’s configured method, query and body; a truthy validated
 receipt marks the effect committed. Missing receipts keep it unknown. Without a
 lookup contract, the UI reports that operator action is required. This interface
 cannot force an unknown effect to success or automatically reissue it.

@@ -196,6 +196,61 @@ class Storage(unittest.IsolatedAsyncioTestCase):
             self.http.include_router(router)
         self.http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.http), base_url="https://instance.example")
 
+    async def test_php_gateway_connector_empty_object_roundtrip(self):
+        # The production PHP client talks to real ASGI handlers and PostgreSQL.
+        import shutil
+        from pathlib import Path
+        source = os.getenv("SATELLITE_NS8_SOURCE")
+        php = shutil.which(os.getenv("SATELLITE_GATEWAY_PHP", "php"))
+        if not source or not php:
+            self.skipTest("requires SATELLITE_NS8_SOURCE and a PHP CLI with cURL")
+        import uvicorn
+        application_client = Path(source) / "freepbx/var/www/html/freepbx/rest/lib/AgentApplicationClient.php"
+        workflow_client = application_client.with_name("AgentWorkflowClient.php")
+        if not application_client.is_file():
+            self.fail("invalid SATELLITE_NS8_SOURCE")
+        value = definition()
+        value["operations"] = [dict(id="empty", description="Empty object regression", method="GET", path="/empty",
+            input_schema=object_schema({}, []), output_schema=object_schema({}, []), query={}, body={}, projection={},
+            read_only=True, public_voice=True, timeout_seconds=2, identity_field=None)]
+        code = """require $argv[1]; require $argv[2];
+        $input = AgentWorkflowClient::decodeObject(stream_get_contents(STDIN));
+        $client = new AgentApplicationClient();
+        $saved = $client->request('PUT', '/resources/connector/gateway', 'test-admin', $input);
+        $published = $client->request('POST', '/resources/connector/gateway/publish', 'test-admin', array('expected_revision' => $saved->revision));
+        echo json_encode($client->request('GET', '/inventory', 'test-admin'));
+        """
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0)); sock.listen()
+        port = sock.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(self.http, log_level="error", lifespan="off"))
+        server_task = None
+        with patch.dict(os.environ, {"API_TOKEN": "synthetic-gateway-token"}):
+            try:
+                server_task = asyncio.create_task(server.serve(sockets=[sock]))
+                for _ in range(500):
+                    if server.started: break
+                    await asyncio.sleep(.01)
+                self.assertTrue(server.started)
+                environment = dict(os.environ, SATELLITE_API_TOKEN="synthetic-gateway-token", SATELLITE_HTTP_PORT=str(port))
+                process = await asyncio.create_subprocess_exec(php, "-r", code, str(application_client), str(workflow_client),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=environment)
+                wire = canonical({"definition": value, "expected_revision": 0}).encode()
+                output, errors = await asyncio.wait_for(process.communicate(wire), 30)
+                self.assertEqual(process.returncode, 0, errors.decode())
+                inventory = __import__("json").loads(output)
+                draft = next(row["draft"] for row in inventory["resources"] if row["resource_id"] == "gateway")
+                operation = draft["operations"][0]
+                for field in ("query", "body", "projection"):
+                    self.assertEqual(operation[field], {})
+                self.assertEqual(operation["input_schema"]["properties"], {})
+                self.assertEqual(operation["output_schema"]["properties"], {})
+                self.assertEqual(self.repo.version("connector", "gateway", 1), value)
+            finally:
+                server.should_exit = True
+                if server_task: await asyncio.wait_for(server_task, 5)
+                sock.close()
+
     async def asyncTearDown(self):
         if hasattr(self, "app"):
             await self.app.stop()
