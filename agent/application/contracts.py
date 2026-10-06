@@ -110,7 +110,7 @@ def connector(value):
     value["origin"] = f"https://{'[' + hostname + ']' if ':' in hostname else hostname}" + (f":{port}" if port != 443 else "")
     identifier(value["secret_ref"])
     fields(value["auth"], ("type",), ("header",))
-    if value["auth"]["type"] not in ("bearer", "api_key"):
+    if value["auth"]["type"] not in ("bearer", "api_key", "basic_api_key"):
         raise ApplicationError("invalid_auth")
     if value["auth"]["type"] == "api_key":
         header = value["auth"].get("header", "")
@@ -132,7 +132,7 @@ def connector(value):
         raise ApplicationError("invalid_operations")
     seen = set()
     for op in operations:
-        fields(op, ("id", "description", "method", "path", "input_schema", "output_schema", "query", "body", "projection", "read_only", "public_voice", "timeout_seconds", "identity_field"), ("idempotency_header", "reconcile"))
+        fields(op, ("id", "description", "method", "path", "input_schema", "output_schema", "query", "body", "projection", "read_only", "public_voice", "timeout_seconds", "identity_field"), ("idempotency_header", "reconcile", "array_projection", "coercions", "open_statuses"))
         identifier(op["id"])
         if op["id"] in seen:
             raise ApplicationError("duplicate_operation")
@@ -140,7 +140,7 @@ def connector(value):
         string(op["description"], 512)
         if type(op["read_only"]) is not bool or type(op["public_voice"]) is not bool:
             raise ApplicationError()
-        if op["method"] not in ("GET", "POST") or op["read_only"] != (op["method"] == "GET") or (op["public_voice"] and not op["read_only"]):
+        if op["method"] not in ("GET", "POST", "PUT", "PATCH") or (op["method"] == "GET" and not op["read_only"]) or (op["public_voice"] and not op["read_only"]):
             raise ApplicationError("invalid_effect_policy")
         path = string(op["path"], 512)
         if not path.startswith("/") or path.startswith("//") or any(c in path for c in ("?", "#", "\\", "%")) or any(p in (".", "..") for p in path.split("/")):
@@ -163,8 +163,19 @@ def connector(value):
                     raise ApplicationError("invalid_mapping")
                 if key != "projection" and source not in properties:
                     raise ApplicationError("invalid_mapping")
-                if key == "projection" and not re.fullmatch(r"[A-Za-z0-9_.]{1,128}", source):
+                if key == "projection" and not re.fullmatch(r"(?:\$|\$count|[A-Za-z0-9_.]{1,128})", source):
                     raise ApplicationError("invalid_mapping")
+        if "array_projection" in op:
+            mapping = op["array_projection"]
+            if not isinstance(mapping, dict) or len(mapping) > 8:
+                raise ApplicationError("invalid_mapping")
+            for target, columns in mapping.items():
+                if target not in op["projection"] or not isinstance(columns, dict) or len(columns) > 32 or any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", k) or not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_.]{1,128}", v) for k, v in columns.items()):
+                    raise ApplicationError("invalid_mapping")
+        if "coercions" in op and (not isinstance(op["coercions"], dict) or any(k not in op["projection"] or v != "string" for k, v in op["coercions"].items())):
+            raise ApplicationError("invalid_mapping")
+        if "open_statuses" in op and (not isinstance(op["open_statuses"], list) or len(op["open_statuses"]) > 20 or any(type(v) is not int or v < 1 for v in op["open_statuses"])):
+            raise ApplicationError("invalid_ticket_statuses")
         if op["method"] == "GET" and op["body"]:
             raise ApplicationError("invalid_mapping")
         integer(op["timeout_seconds"], 1, 30)

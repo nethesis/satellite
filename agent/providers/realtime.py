@@ -180,6 +180,48 @@ class _RealtimeAdapter:
                 self._event_ready.clear()
                 await self._event_ready.wait()
 
+    async def workflow_update(self, instructions, tools, *, auto_response=True):
+        """Change the current workflow step without changing the voice/model."""
+        async with self._respond_lock:
+            async with self._condition:
+                await self._condition.wait_for(lambda: self._closed or (
+                    self._response_done and not self._audio_playing and not self._pending))
+                if self._closed:
+                    raise ProviderError("workflow sideband closed")
+            self._ready.clear()
+            session = {"instructions": instructions, "tools": _tools(tools)}
+            if self.provider == "openai":
+                session.update({"type": "realtime", "audio": {"input": {"turn_detection": {
+                    "type": "server_vad", "silence_duration_ms": 1000,
+                    "create_response": auto_response, "interrupt_response": auto_response}}}})
+            else:
+                session["turn_detection"] = {"type": "server_vad"} if auto_response else None
+            await self._send({"type": "session.update", "session": session})
+            await asyncio.wait_for(self._ready.wait(), 10)
+            if self._closed:
+                raise ProviderError("workflow session update failed")
+
+    async def workflow_respond(self, instructions=None, *, wait=False):
+        """A new explicit response, independently of tool continuation tokens."""
+        async with self._respond_lock:
+            async with self._condition:
+                await self._condition.wait_for(lambda: self._closed or (
+                    self._response_done and not self._audio_playing and not self._pending))
+                if self._closed:
+                    raise ProviderError("workflow sideband closed")
+                self._response_done = False
+            value = {"type": "response.create"}
+            if instructions is not None:
+                value["response"] = {"instructions": instructions}
+            await self._send(value)
+        if wait:
+            async with self._condition:
+                await self._condition.wait_for(lambda: self._closed or (
+                    self._response_done and not self._audio_playing and not self._pending))
+                if self._closed:
+                    raise ProviderError("workflow response interrupted")
+
+
     async def _emit(self, event: dict) -> None:
         # A stalled consumer must not force unbounded memory growth.
         try:
@@ -357,7 +399,7 @@ class _RealtimeAdapter:
                     self._response_done = True
                 self._condition.notify_all()
             await self._emit({"type": "response_done", "response_id": response_id,
-                              "status": response.get("status")})
+                              "status": response.get("status"), "has_tool_calls": bool(self._pending)})
 
     async def _tool_call(self, item: dict, response_id: str | None) -> None:
         invocation_id = item.get("call_id")
@@ -414,6 +456,8 @@ class OpenAIAdapter(_RealtimeAdapter):
                 "instructions": _instructions(profile),
                 "audio": {"output": {"voice": _profile_value(profile, "voice", "alloy")}},
                 "tools": self._tools_config}
+        if profile.get("_workflow_mode"):
+            body["audio"]["input"] = {"turn_detection": {"type": "server_vad", "create_response": False, "interrupt_response": False}}
         await self._post(self.http_base + "/calls/" + quote(call_id, safe="") + "/accept", body)
 
     async def connect(self, provider_call_id: str) -> None:
@@ -441,7 +485,7 @@ class GrokAdapter(_RealtimeAdapter):
         await self._send({"type": "session.update", "session": {
             "voice": _profile_value(self._profile, "voice", "eve"),
             "instructions": _instructions(self._profile),
-            "turn_detection": {"type": "server_vad"},
+            "turn_detection": None if self._profile.get("_workflow_mode") else {"type": "server_vad"},
             "tools": self._tools_config,
         }})
         try:

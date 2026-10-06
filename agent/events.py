@@ -14,6 +14,8 @@ _SAFE_FIELDS = {
     "payload_hash", "runtime_epoch", "cdr_id",
     "execution_kind", "client_id", "definition_revision", "grant_revision",
     "operation_id", "effect_state", "retry_count", "actor",
+    "node_id", "block_type", "step_sequence", "parent_run_id", "execution_hash",
+    "response_count", "invocation_count", "completion_count", "invalid_completion_count",
 }
 
 

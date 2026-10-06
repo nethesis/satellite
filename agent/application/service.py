@@ -1,6 +1,7 @@
 """Shared connector execution and bounded non-voice admission/lifecycle."""
 
 import asyncio
+import base64
 import copy
 import hashlib
 import json
@@ -34,6 +35,14 @@ def reference_key(ref):
 
 def connector_tool_id(ref):
     return f"connector.{ref['connector_id']}.{ref['operation_id']}.v{ref['version']}"
+
+
+def credential_headers(cfg, credential):
+    if cfg["auth"]["type"] == "bearer":
+        return {"Authorization": "Bearer " + credential}
+    if cfg["auth"]["type"] == "basic_api_key":
+        return {"Authorization": "Basic " + base64.b64encode((credential + ":X").encode()).decode()}
+    return {cfg["auth"]["header"]: credential}
 
 
 class Application:
@@ -135,6 +144,8 @@ class Application:
             self._rate.popitem(last=False)
 
     async def submit(self, client, request, idempotency):
+        if isinstance(request, dict) and "agent_id" in request:
+            return await self.runtime.workflows.submit_api(client, request, idempotency)
         self.require_available()
         self.scope(client, "runs:create")
         request = run_request(request)
@@ -284,12 +295,22 @@ class Application:
 
     async def run(self, client, run_id):
         self.scope(client, "runs:read")
-        row = await self.db("run", run_id, client["client_id"])
+        try:
+            row = await self.db("run", run_id, client["client_id"])
+        except ApplicationError as exc:
+            if exc.code not in ("not_found", "run_not_found") or getattr(self.runtime, "workflows", None) is None:
+                raise
+            return await self.runtime.workflows.api_run(client, run_id)
         return self.public_run(row) | {"effects": await self.db("effects", run_id)}
 
     async def result(self, client, run_id):
         self.scope(client, "runs:read")
-        row = await self.db("run", run_id, client["client_id"])
+        try:
+            row = await self.db("run", run_id, client["client_id"])
+        except ApplicationError as exc:
+            if exc.code not in ("not_found", "run_not_found") or getattr(self.runtime, "workflows", None) is None:
+                raise
+            return await self.runtime.workflows.api_run(client, run_id, result=True)
         if row["status"] not in TERMINAL:
             return {"state": "pending"}
         if row["result"] is None or (row["result_expires"] or 0) <= time.time():
@@ -299,6 +320,12 @@ class Application:
 
     async def cancel(self, client, run_id):
         self.scope(client, "runs:cancel")
+        try:
+            await self.db("run", run_id, client["client_id"])
+        except ApplicationError as exc:
+            if exc.code not in ("not_found", "run_not_found") or getattr(self.runtime, "workflows", None) is None:
+                raise
+            return await self.runtime.workflows.api_run(client, run_id, cancel=True)
         result = await self.db("cancel", run_id, client["client_id"])
         if result["cancel_requested"] and run_id in self.active:
             self.active[run_id]["cancellation"].set()
@@ -331,6 +358,8 @@ class Application:
 
     async def authorize(self, item, args, context):
         self.require_available()
+        if get(context, "_workflow"):
+            return await self.runtime.workflows.authorize_connector(item, args, context)
         ref = item["reference"]; op = item["operation"]
         if not await self.db("enabled"):
             raise ApplicationError("access_disabled", 403)
@@ -389,14 +418,10 @@ class Application:
             async with self._io_slots[kind], slots:
                 await self.authorize(item, args, context)
                 credential = await self.db("secret", cfg["secret_ref"], self.key)
-                headers = {"Content-Type": "application/json"}
-                if cfg["auth"]["type"] == "bearer":
-                    headers["Authorization"] = "Bearer " + credential
-                else:
-                    headers[cfg["auth"]["header"]] = credential
+                headers = {"Content-Type": "application/json"} | credential_headers(cfg, credential)
                 effect = None
                 if not op["read_only"]:
-                    effect, fresh = await self.db("prepare_effect", get(context, "run_id"), "create_ticket", args, ref)
+                    effect, fresh = await self.db("prepare_effect", get(context, "run_id"), get(context, "effect_key", "create_ticket"), args, ref)
                     if not fresh:
                         if effect["state"] == "committed" and effect["response"] is not None and effect["result_expires"] > time.time():
                             return self.key.decrypt(f"effect:{effect['operation_id']}", effect["response"])
@@ -453,7 +478,7 @@ class Application:
         path, query, body = mapped_request(target, args)
         cfg = item["connector"]
         credential = await self.db("secret", cfg["secret_ref"], self.key)
-        headers = {"Authorization": "Bearer " + credential} if cfg["auth"]["type"] == "bearer" else {cfg["auth"]["header"]: credential}
+        headers = credential_headers(cfg, credential)
         slots = self._connector_slots.setdefault((ref["connector_id"], "api"), asyncio.Semaphore(1))
         async with asyncio.timeout(target["timeout_seconds"]):
             async with self._io_slots["api"], slots:

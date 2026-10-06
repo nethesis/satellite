@@ -162,6 +162,9 @@ def validate_payload(payload: Any) -> dict:
             if d["profile_key"] != key:
                 _invalid("invalid built-in destination ownership")
             builtin_types.add(d["agent_type"])
+        elif d["agent_type"] == "workflow":
+            if d["profile_key"] is not None or not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", str(d.get("workflow_agent_id", ""))) or type(d.get("workflow_version")) is not int or d["workflow_version"] < 1:
+                _invalid("invalid workflow destination")
         elif d["profile_key"] is not None:
             _invalid("non-built-in destination has built-in profile")
     if builtin_types != {"builtin_internal", "builtin_external"}:

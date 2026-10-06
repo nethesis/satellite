@@ -12,7 +12,7 @@ ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 def create_monitoring_router(runtime):
     def active_api():
-        return getattr(getattr(runtime,"application",None),"active",{})
+        return getattr(getattr(runtime,"application",None),"active",{}) | getattr(getattr(runtime,"workflows",None),"active",{})
 
     def owns(value):
         return (value["run_id"] in active_api() if value.get("execution_kind")=="api"
@@ -51,7 +51,9 @@ def create_monitoring_router(runtime):
         if getattr(runtime,"application",None):
             history["application_health"]=runtime.application.health()
             history["active_runs"].extend(runtime.application.public_run(item["row"]) |
-                {"execution_kind":"api","agent_id":"support-request"} for item in active_api().values())
+                {"execution_kind":"api","agent_id":"support-request"} for item in runtime.application.active.values())
+        if getattr(runtime,"workflows",None):
+            history["active_runs"].extend(runtime.workflows.public_run(item["row"]) for item in runtime.workflows.active.values())
         history["history_complete"]=history["history_complete"] and runtime.monitoring.health()["available"]
         return history
 
@@ -64,14 +66,21 @@ def create_monitoring_router(runtime):
         if callable(payload): payload=payload()
         payload=payload or {};profiles=payload.get("profiles",{})
         bindings={b["id"]:b for b in payload.get("bindings",[])}
-        return {"policy":runtime.monitoring.policy,"items":[{"agent_id":key,
+        items=[{"agent_id":key,"name":key.capitalize(),"kind":"builtin",
             "provider":bindings.get(p.get("trunk_id"),{}).get("provider"),
             "configured":p.get("trunk_id") in bindings,"transcript_supported":bindings.get(p.get("trunk_id"),{}).get("provider")=="openai"}
-            for key,p in profiles.items()]}
+            for key,p in profiles.items()]
+        if getattr(runtime,"workflows",None) and runtime.workflows.available:
+            try:
+                inventory=await runtime.workflows.inventory()
+                items.extend({key:agent.get(key) for key in ("agent_id","name","kind","status","provider","version","tools")} for agent in inventory["agents"] if agent["kind"]=="agent")
+            except Exception:
+                pass
+        return {"policy":runtime.monitoring.policy,"items":items}
 
     @router.get("/runs")
     async def runs(limit:int=Query(50,ge=1,le=100),cursor:str|None=Query(None,max_length=512),
-        agent:str|None=Query(None,pattern="^(internal|external|support-request)$"),provider:str|None=Query(None,pattern="^(openai|grok)$"),
+        agent:str|None=Query(None,pattern="^[a-z][a-z0-9_-]{0,47}$"),provider:str|None=Query(None,pattern="^(openai|grok)$"),
         outcome:str|None=Query(None,pattern="^(active|completed|fallback|handed_off|unknown|interrupted|failed|cancelled)$"),
         correlation:str|None=Query(None,max_length=128),after:float|None=Query(None,ge=0,le=1e12),
         before:float|None=Query(None,ge=0,le=1e12),tool_error:bool=False,

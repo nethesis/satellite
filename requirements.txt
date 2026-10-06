@@ -18,3 +18,7 @@ websockets>=11.0.3
 zstandard
 jsonschema==4.23.0
 cryptography==46.0.3
+openpyxl==3.1.5
+regex==2026.9.29
+google-auth==2.59.1
+requests==2.34.2

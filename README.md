@@ -352,9 +352,10 @@ This project is licensed under the GNU General Public License v3.0. See the [LIC
 The image `ghcr.io/nethesis/satellite:agent` includes voice agents, encrypted
 monitoring history, and configurable business connectors with an OpenAI Responses
 text executor. Existing transcription and MQTT interfaces remain compatible.
-See [monitoring API](docs/agents/monitoring-api-contract.md) and
-[application API](docs/agents/phase4-api-contract.md) for configuration, opt-in
-controls, permissions, scoped API clients, and deployment prerequisites.
+See [monitoring API](docs/agents/monitoring-api-contract.md),
+[application API](docs/agents/phase4-api-contract.md) and
+[workflow API](docs/agents/workflow-api-contract.md) for configuration, capture
+controls, permissions, scoped API clients and deployment requirements.
 
 Enabled tools are appended to the effective provider instructions automatically.
 Call transfer includes only permitted, visible destinations with native extension
@@ -377,3 +378,26 @@ credentials or OpenAI account is required.
 `test_application_acceptance.py` and `test_monitoring_acceptance.py` guard their
 storage tests with explicit isolated database host names and acceptance flags.
 Never point these destructive fixture tests at an existing database.
+
+### Agent workflows
+
+The runtime executes published block graphs for voice and API agents. Templates
+include a call router, customer support and a payment secretary. Connectors,
+data sources and reusable blocks use pinned published versions. The payment
+secretary supports text, CSV, XLSX, private Google Sheets and published Google CSV.
+Consultative transfer requires operator acceptance before connecting the caller.
+
+Use the NethVoice Builder to configure and publish a graph. Test with synthetic
+fixtures first. Ask for confirmation before a final OpenAI test. Mock tests make
+no provider calls and do not appear as live history runs. For an approved live
+test, check the run status and each block outcome in the graph trace.
+
+Run the local workflow regressions with:
+
+```sh
+pytest tests/test_workflows.py tests/test_workflow_voice.py tests/test_workflow_provider.py
+```
+
+These tests use mock providers and a local WebSocket emulator. They do not call
+OpenAI or a production PBX. Database and PBX integration tests remain in the
+[NethVoice module repository](https://github.com/nethesis/ns8-nethvoice/tree/agent/satellite/tests).

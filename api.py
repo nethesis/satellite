@@ -726,6 +726,8 @@ app.include_router(create_monitoring_router(agent_runtime))
 from agent.application.api import create_application_routers
 for application_router in create_application_routers(agent_runtime.application):
     app.include_router(application_router)
+from agent.workflows.api import create_workflow_router
+app.include_router(create_workflow_router(agent_runtime.workflows))
 
 @app.on_event("startup")
 async def _start_agent_runtime():

@@ -103,11 +103,11 @@ class Monitoring:
         requested=self.policy["transcripts"].get(agent,False)
         enabled=self.capture_available(agent,provider)
         call.profile["_capture_transcripts"]=enabled
-        call.profile["_capture_version"]=self.policy["capture_versions"][agent]
+        call.profile["_capture_version"]=self.policy["capture_versions"].get(agent,0)
         value={"run_id":call.run_id,"session_id":call.session_id,"agent_id":agent,
             "provider":provider,"cdr_id":call.caller_id,"destination_id":call.destination_id,
             "epoch":self.epoch,"revision":call.revision,"payload_hash":call.payload_hash,
-            "started":time.time(),"capture_version":self.policy["capture_versions"][agent],
+            "started":time.time(),"capture_version":self.policy["capture_versions"].get(agent,0),
             "transcript_state":("pending" if enabled else ("unsupported" if provider!="openai" and requested else
                 "unavailable" if requested else "disabled"))}
         self.enqueue("run",value)

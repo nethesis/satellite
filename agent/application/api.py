@@ -151,8 +151,14 @@ def create_application_routers(application):
             identifier(value["client_id"])
             if not isinstance(value["scopes"], list) or not value["scopes"] or any(not isinstance(v, str) or v not in SCOPE for v in value["scopes"]):
                 raise ApplicationError("invalid_scopes")
-            if value["presets"] != ["support-request"]:
+            if not isinstance(value["presets"], list) or not 1 <= len(value["presets"]) <= 100:
                 raise ApplicationError("invalid_presets")
+            for target in value["presets"]:
+                identifier(target)
+                if target != "support-request":
+                    graph = (await application.runtime.workflows.db("workflow_active", target))["definition"]
+                    if "api" not in graph["entrypoints"]:
+                        raise ApplicationError("entrypoint_capability_mismatch")
             references(value["operations"])
             if not isinstance(value["customer_ids"], list) or not 1 <= len(value["customer_ids"]) <= 100:
                 raise ApplicationError("invalid_customer_ids")
@@ -190,16 +196,28 @@ def create_application_routers(application):
     @admin.get("/runs/{run_id}/result")
     async def admin_result(run_id: str, actor=Depends(private)):
         async def read():
-            row = await application.db("run", run_id)
-            client = {"client_id": row["client_id"], "definition": {"scopes": ["runs:read"]}}
+            try:
+                row = await application.db("run", run_id)
+                client_id = row["client_id"]
+            except ApplicationError as exc:
+                if exc.code not in ("not_found", "run_not_found") or getattr(application.runtime, "workflows", None) is None:
+                    raise
+                client_id = (await application.runtime.workflows.db("execution", run_id))["principal"]
+            client = {"client_id": client_id, "definition": {"scopes": ["runs:read"]}}
             return await application.result(client, run_id)
         return await guarded(read, actor)
 
     @admin.post("/runs/{run_id}/cancel")
     async def admin_cancel(run_id: str, actor=Depends(private)):
         async def cancel():
-            row = await application.db("run", run_id)
-            client = {"client_id": row["client_id"], "definition": {"scopes": ["runs:cancel"]}}
+            try:
+                row = await application.db("run", run_id)
+                client_id = row["client_id"]
+            except ApplicationError as exc:
+                if exc.code not in ("not_found", "run_not_found") or getattr(application.runtime, "workflows", None) is None:
+                    raise
+                client_id = (await application.runtime.workflows.db("execution", run_id))["principal"]
+            client = {"client_id": client_id, "definition": {"scopes": ["runs:cancel"]}}
             result = await application.cancel(client, run_id)
             await application.db("record_audit", actor, "run_cancel_requested", run_id)
             return result

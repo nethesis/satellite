@@ -155,6 +155,27 @@ class AriController:
         await self.request("POST", f"/bridges/{quote(bridge_id, safe='')}/addChannel",
                            params={"channel": ",".join(channel_ids)})
 
+    async def remove_from_bridge(self, bridge_id, channel_ids):
+        await self.request("POST", f"/bridges/{quote(bridge_id, safe='')}/removeChannel",
+                           params={"channel": ",".join(channel_ids)})
+
+    async def moh(self, channel_id, enabled):
+        await self.request("POST" if enabled else "DELETE", f"/channels/{quote(channel_id, safe='')}/moh")
+
+    async def mute(self, channel_id, enabled, direction='out'):
+        if direction not in ('in', 'out', 'both'):
+            raise ValueError('invalid audio direction')
+        await self.request('POST' if enabled else 'DELETE', f"/channels/{quote(channel_id, safe='')}/mute", params={'direction':direction})
+
+    async def originate_consult(self, session_id, attempt_id, channel_id, extension, seconds):
+        if not str(extension).isdigit():
+            raise ValueError("invalid consultation extension")
+        return await self.request("POST", "/channels", params={
+            "endpoint": f"Local/{extension}@from-internal/n", "app": self.app,
+            "appArgs": f"consult,{session_id},{attempt_id}", "channelId": channel_id,
+            "timeout": seconds}, json_body={"variables": {"__AGENT_ROLE": "consult",
+                "__AGENT_SESSION_ID": session_id, "__AGENT_CONSULT_ATTEMPT": attempt_id}})
+
     async def destroy_bridge(self, bridge_id):
         try:
             await self.request("DELETE", f"/bridges/{quote(bridge_id, safe='')}")

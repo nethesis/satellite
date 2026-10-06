@@ -137,14 +137,17 @@ def mapped_request(operation, args):
     query = {target: args[source] for target, source in operation["query"].items() if source in args}
     if any(not isinstance(v, (str, int, float, bool)) or isinstance(v, (list, dict)) for v in query.values()):
         raise ApplicationError("invalid_input")
-    body = {target: args[source] for target, source in operation["body"].items() if source in args} if operation["method"] == "POST" else None
+    body = {target: args[source] for target, source in operation["body"].items() if source in args} if operation["method"] in ("POST", "PUT", "PATCH") else None
     return path, query, body
 
 
 def project(response, operation):
     result = {}
-    for target, path in operation["projection"].items():
-        item = response
+    def field(item, path):
+        if path == "$":
+            return item
+        if path == "$count" and isinstance(item, list):
+            return len(item)
         for key in path.split("."):
             if isinstance(item, dict) and key in item:
                 item = item[key]
@@ -152,6 +155,17 @@ def project(response, operation):
                 item = item[int(key)]
             else:
                 raise ApplicationError("invalid_remote_result", 503)
+        return item
+    for target, path in operation["projection"].items():
+        item = field(response, path)
+        if target in operation.get("array_projection", {}):
+            if not isinstance(item, list) or len(item) > 100:
+                raise ApplicationError("invalid_remote_result", 503)
+            item = [{k: field(row, v) for k, v in operation["array_projection"][target].items()} for row in item]
+        if operation.get("coercions", {}).get(target) == "string":
+            if type(item) not in (str, int):
+                raise ApplicationError("invalid_remote_result", 503)
+            item = str(item)
         result[target] = item
     if len(canonical(result).encode()) > 16384:
         raise ApplicationError("projected_result_too_large", 503)
