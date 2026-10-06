@@ -12,7 +12,7 @@ from .contracts import definition, execution_hash
 DDL = """
 CREATE SCHEMA IF NOT EXISTS agent_workflows;
 CREATE TABLE IF NOT EXISTS agent_workflows.migrations(version integer PRIMARY KEY);
-INSERT INTO agent_workflows.migrations VALUES(1) ON CONFLICT DO NOTHING;
+INSERT INTO agent_workflows.migrations VALUES(1),(2) ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS agent_workflows.definitions(
  kind varchar(16), agent_id varchar(48), revision bigint NOT NULL,
  draft jsonb NOT NULL, published_version integer NOT NULL DEFAULT 0,
@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS agent_workflows.data(
  resource_id varchar(48) PRIMARY KEY, revision bigint NOT NULL,
  settings jsonb NOT NULL, published_version integer NOT NULL DEFAULT 0,
  status varchar(32) NOT NULL, error_code varchar(64), last_refresh double precision);
+ALTER TABLE agent_workflows.data ADD COLUMN IF NOT EXISTS last_attempt double precision;
 CREATE TABLE IF NOT EXISTS agent_workflows.data_versions(
  resource_id varchar(48), version integer, metadata jsonb NOT NULL,
  ciphertext bytea NOT NULL, original bytea, created double precision NOT NULL,
@@ -38,6 +39,9 @@ CREATE TABLE IF NOT EXISTS agent_workflows.executions(
  definition jsonb NOT NULL, result bytea, result_expires double precision,
  idempotency_hash varchar(64), input_digest varchar(64),
  UNIQUE(principal,idempotency_hash));
+CREATE TABLE IF NOT EXISTS agent_workflows.execution_data_refs(
+ run_id varchar(128) REFERENCES agent_workflows.executions ON DELETE CASCADE,
+ resource_id varchar(48), version integer, PRIMARY KEY(run_id,resource_id,version));
 CREATE TABLE IF NOT EXISTS agent_workflows.steps(
  run_id varchar(128) REFERENCES agent_workflows.executions ON DELETE CASCADE,
  sequence integer, node_id varchar(48), block_type varchar(48), status varchar(32),
@@ -45,6 +49,9 @@ CREATE TABLE IF NOT EXISTS agent_workflows.steps(
  error_code varchar(64), PRIMARY KEY(run_id,sequence));
 ALTER TABLE agent_workflows.steps ADD COLUMN IF NOT EXISTS subflow_path varchar(256) NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS workflow_execution_status ON agent_workflows.executions(status,started);
+CREATE TABLE IF NOT EXISTS agent_workflows.verification_attempts(
+ resource_id varchar(48), subject varchar(128), attempts integer NOT NULL,
+ started double precision NOT NULL, PRIMARY KEY(resource_id,subject));
 CREATE TABLE IF NOT EXISTS agent_workflows.ingestion_jobs(
  job_id varchar(32) PRIMARY KEY, resource_id varchar(48), expected_revision bigint,
  actor varchar(128), state varchar(32), input bytea, result jsonb, error_code varchar(64),
@@ -59,7 +66,7 @@ class WorkflowRepository(ApplicationRepository):
             for sql in DDL.split(";"):
                 if sql.strip():
                     db.execute(sql)
-            if db.execute("SELECT max(version) AS v FROM agent_workflows.migrations").fetchone()["v"] != 1:
+            if db.execute("SELECT max(version) AS v FROM agent_workflows.migrations").fetchone()["v"] != 2:
                 raise ApplicationError("workflow_schema_newer", 503)
             db.execute("UPDATE agent_workflows.executions SET status='interrupted',ended=%s,error_code='runtime_restart' "
                        "WHERE status IN ('accepted','running') AND (epoch<>%s OR (%s AND NOT(run_id=ANY(%s::varchar[]))))",
@@ -164,7 +171,11 @@ class WorkflowRepository(ApplicationRepository):
                             raise ApplicationError('effect_tool_requires_action_node', 409)
             if node["type"] in ("data.lookup", "identity.resolve", "identity.verify"):
                 ref = cfg["resource"]
-                row = db.execute("SELECT revoked FROM agent_workflows.data_versions WHERE resource_id=%s AND version=%s", (ref["resource_id"], ref["version"])).fetchone()
+                version = ref["version"]
+                if version == "latest":
+                    data = db.execute("SELECT published_version FROM agent_workflows.data WHERE resource_id=%s", (ref["resource_id"],)).fetchone()
+                    version = data["published_version"] if data else 0
+                row = db.execute("SELECT revoked FROM agent_workflows.data_versions WHERE resource_id=%s AND version=%s", (ref["resource_id"], version)).fetchone()
                 if not row or row["revoked"]:
                     raise ApplicationError("data_unavailable", 409)
             if node["type"] == "subflow":
@@ -237,7 +248,7 @@ class WorkflowRepository(ApplicationRepository):
 
     def data_refresh_error(self, resource_id, code):
         with self.connect() as db:
-            db.execute("UPDATE agent_workflows.data SET status='refresh_failed',error_code=%s WHERE resource_id=%s", (code, resource_id))
+            db.execute("UPDATE agent_workflows.data SET status='refresh_failed',error_code=%s,last_attempt=%s WHERE resource_id=%s", (code, time.time(), resource_id))
 
     def data_publish(self, resource_id, expected, rows, original, metadata, key, actor, job_id=None):
         with self.connect() as db:
@@ -245,20 +256,80 @@ class WorkflowRepository(ApplicationRepository):
             row = db.execute("SELECT * FROM agent_workflows.data WHERE resource_id=%s FOR UPDATE", (resource_id,)).fetchone()
             if not row or row["revision"] != expected:
                 raise ApplicationError("revision_conflict", 409)
+            now = time.time()
+            previous = db.execute("SELECT * FROM agent_workflows.data_versions WHERE resource_id=%s AND version=%s", (resource_id, row["published_version"])).fetchone()
+            if previous and not previous["revoked"] and previous["metadata"] == metadata and key.decrypt(f"table:{resource_id}:{previous['version']}", previous["ciphertext"]) == rows:
+                result = {"version": previous["version"], "revision": expected, "row_count": len(rows), "created": previous["created"], "unchanged": True}
+                db.execute("UPDATE agent_workflows.data SET status='ready',error_code=NULL,last_refresh=%s,last_attempt=%s WHERE resource_id=%s", (now, now, resource_id))
+                if job_id:
+                    db.execute("UPDATE agent_workflows.ingestion_jobs SET state='ready',input=NULL,result=%s WHERE job_id=%s", (Jsonb(result), job_id))
+                return result
+            self.prune_data(db, resource_id)
+            resource_size = db.execute("SELECT COALESCE(sum(octet_length(ciphertext)+COALESCE(octet_length(original),0)),0) AS n FROM agent_workflows.data_versions WHERE resource_id=%s", (resource_id,)).fetchone()["n"]
             size = db.execute("SELECT COALESCE(sum(octet_length(ciphertext)+COALESCE(octet_length(original),0)),0) AS n FROM agent_workflows.data_versions").fetchone()["n"]
             version = row["published_version"] + 1
             content = key.encrypt(f"table:{resource_id}:{version}", rows)
             original_content = key.encrypt(f"original:{resource_id}:{version}", original) if original else None
-            if size + len(content) + (len(original_content) if original_content else 0) > 256 * 1024**2:
+            added = len(content) + (len(original_content) if original_content else 0)
+            if resource_size + added > 64 * 1024**2:
+                raise ApplicationError("data_resource_capacity", 429)
+            if size + added > 256 * 1024**2:
                 raise ApplicationError("data_storage_capacity", 429)
             now = time.time()
             db.execute("INSERT INTO agent_workflows.data_versions VALUES(%s,%s,%s,%s,%s,%s,false)", (resource_id, version, Jsonb(metadata), content, original_content, now))
-            db.execute("UPDATE agent_workflows.data SET published_version=%s,revision=revision+1,status='ready',error_code=NULL,last_refresh=%s WHERE resource_id=%s", (version, now, resource_id))
+            db.execute("UPDATE agent_workflows.data SET published_version=%s,revision=revision+1,status='ready',error_code=NULL,last_refresh=%s,last_attempt=%s WHERE resource_id=%s", (version, now, now, resource_id))
             self.audit(db, actor, "data_published", f"{resource_id}:{version}")
             if job_id:
                 db.execute("UPDATE agent_workflows.ingestion_jobs SET state='ready',input=NULL,result=%s WHERE job_id=%s",
                     (Jsonb({"version": version, "revision": expected + 1, "row_count": len(rows), "created": now}), job_id))
         return {"version": version, "revision": expected + 1, "row_count": len(rows), "created": now}
+
+    def prune_data(self, db, resource_id):
+        db.execute("DELETE FROM agent_workflows.data_versions v WHERE v.resource_id=%s "
+            "AND v.version < (SELECT published_version-2 FROM agent_workflows.data WHERE resource_id=v.resource_id) "
+            "AND NOT EXISTS(SELECT 1 FROM agent_workflows.execution_data_refs p JOIN agent_workflows.executions e USING(run_id) "
+            "WHERE p.resource_id=v.resource_id AND p.version=v.version AND e.status IN ('accepted','running')) "
+            "AND NOT EXISTS(SELECT 1 FROM (SELECT definition AS graph FROM agent_workflows.versions WHERE NOT revoked "
+            "UNION ALL SELECT draft FROM agent_workflows.definitions) g, jsonb_array_elements(g.graph->'nodes') n "
+            "WHERE n->>'type' IN ('data.lookup','identity.resolve','identity.verify') "
+            "AND n->'config'->'resource'->>'resource_id'=v.resource_id "
+            "AND n->'config'->'resource'->>'version'=v.version::text)", (resource_id,))
+
+    def data_latest_versions(self, resources, run_id=None, fixed_refs=()):
+        with self.connect() as db:
+            db.execute("SELECT pg_advisory_xact_lock(783510)")
+            rows = db.execute("SELECT d.resource_id,d.published_version AS version,d.last_refresh,v.revoked "
+                "FROM agent_workflows.data d JOIN agent_workflows.data_versions v ON v.resource_id=d.resource_id AND v.version=d.published_version "
+                "WHERE d.resource_id=ANY(%s)", (list(resources),)).fetchall()
+            if len(rows) != len(resources) or any(row["revoked"] for row in rows):
+                raise ApplicationError("data_unavailable", 409)
+            if run_id:
+                owner = db.execute("SELECT status FROM agent_workflows.executions WHERE run_id=%s", (run_id,)).fetchone()
+                if not owner or owner["status"] not in ("accepted", "running"):
+                    raise ApplicationError("cancelled", 409)
+                references = set(fixed_refs) | {(row["resource_id"], row["version"]) for row in rows}
+                for resource_id, version in references:
+                    available = db.execute("SELECT revoked FROM agent_workflows.data_versions WHERE resource_id=%s AND version=%s", (resource_id, version)).fetchone()
+                    if not available or available["revoked"]:
+                        raise ApplicationError("data_unavailable", 409)
+                    db.execute("INSERT INTO agent_workflows.execution_data_refs VALUES(%s,%s,%s) ON CONFLICT DO NOTHING", (run_id, resource_id, version))
+        return {row["resource_id"]: row for row in rows}
+
+    def verification_attempt(self, resource_id, run_id, resident):
+        now = time.time()
+        with self.connect() as db:
+            db.execute("SELECT pg_advisory_xact_lock(783512)")
+            scopes = [("resource", 100, 60), ("call:" + digest(run_id), 5, 600)]
+            if resident:
+                scopes.append(("resident:" + digest(resident), 5, 600))
+            for subject, limit, window in scopes:
+                row = db.execute("SELECT * FROM agent_workflows.verification_attempts WHERE resource_id=%s AND subject=%s FOR UPDATE", (resource_id, subject)).fetchone()
+                if row and now-row["started"] < window and row["attempts"] >= limit:
+                    raise ApplicationError("verification_attempts_exhausted", 429)
+            for subject, limit, window in scopes:
+                db.execute("INSERT INTO agent_workflows.verification_attempts VALUES(%s,%s,1,%s) "
+                    "ON CONFLICT(resource_id,subject) DO UPDATE SET attempts=CASE WHEN %s-agent_workflows.verification_attempts.started >= %s THEN 1 ELSE agent_workflows.verification_attempts.attempts+1 END, "
+                    "started=CASE WHEN %s-agent_workflows.verification_attempts.started >= %s THEN %s ELSE agent_workflows.verification_attempts.started END", (resource_id, subject, now, now, window, now, window, now))
 
     def data_rows(self, resource_id, version, key):
         with self.connect() as db:
@@ -347,6 +418,10 @@ class WorkflowRepository(ApplicationRepository):
 
     def workflow_purge(self):
         with self.connect() as db:
+            db.execute("SELECT pg_advisory_xact_lock(783510)")
+            db.execute("DELETE FROM agent_workflows.verification_attempts WHERE started<%s", (time.time()-600,))
+            for row in db.execute("SELECT resource_id FROM agent_workflows.data").fetchall():
+                self.prune_data(db, row["resource_id"])
             db.execute("UPDATE agent_workflows.executions SET result=NULL WHERE result_expires<%s", (time.time(),))
             db.execute("DELETE FROM agent_workflows.ingestion_jobs WHERE created<%s AND state NOT IN ('queued','processing')", (time.time() - 86400,))
             db.execute("DELETE FROM agent_workflows.executions WHERE ended<%s AND status NOT IN ('running','accepted') "

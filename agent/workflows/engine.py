@@ -54,10 +54,13 @@ class WorkflowEngine:
         if depth > 4:
             raise ApplicationError("subflow_depth_exceeded")
         validate(inputs or {}, graph["input_schema"])
+        if depth == 0 and not context.get("test_mode") and hasattr(self.service, "prepare_data"):
+            await self.service.prepare_data(graph, context)
         nodes = {node["id"]: node for node in graph["nodes"]}
         edges = {(edge["source"], edge["outcome"]): edge["target"] for edge in graph["edges"]}
         current = next(node["id"] for node in graph["nodes"] if node["type"].startswith("start."))
         outputs = {}; trace = []; result = {}; status = "completed"
+        context.setdefault("child_traces", [])
         context.setdefault("step_count", 0)
         context.setdefault("global_max_steps", graph["limits"]["max_steps"])
         initial_steps = context["step_count"]
@@ -83,6 +86,8 @@ class WorkflowEngine:
                     # The nested engine applies the child graph deadline. Do not
                     # wrap a whole reusable graph in a single-operation timeout.
                     step_timeout = remaining
+                elif node["type"] == "voice.consult":
+                    step_timeout = min(remaining, node["config"].get("ring_seconds", 30) + node["config"].get("consult_seconds", 30) + 60)
                 else:
                     step_timeout = min(remaining, 120 if node["type"].startswith(("conversation.", "voice.")) or node["type"] == "action.confirm" else node["config"].get("timeout_seconds", 10))
                 outcome, value = await asyncio.wait_for(self.run_node(node, node_inputs, graph, context, inputs or {}, depth),
@@ -96,12 +101,18 @@ class WorkflowEngine:
                 outcome, value, error = "timeout", {}, "step_timeout"
             except ApplicationError as exc:
                 outcome, value, error = "error", {}, exc.code
+            except Exception:
+                outcome, value, error = "error", {}, "block_failed"
             elapsed = int((time.monotonic() - started) * 1000)
             await self.service.step(context, sequence, node, "failed" if error else "completed", outcome, elapsed, error)
             trace.append({"node_id": current, "subflow_path": '/'.join(context.get('subflow_path', [])), "block_type": node["type"], "outcome": outcome, "duration_ms": elapsed, "error_code": error})
             if context.get("test_mode"):
                 trace[-1]["output"] = copy.deepcopy(value)
+            trace.extend(context["child_traces"])
+            context["child_traces"].clear()
             if node["type"] == "end":
+                if error:
+                    raise ApplicationError(error, 503)
                 result, status = value, node["config"].get("status", "completed")
                 break
             if outcome in ("handed_off", "accepted") and node["type"] in ("pbx.route", "agent.route", "voice.consult"):
@@ -120,8 +131,9 @@ class WorkflowEngine:
     async def run_node(self, node, args, graph, context, inputs, depth):
         kind, cfg = node["type"], node["config"]
         validate(args, CATALOG_BY_TYPE[kind]['input_schema'])
-        if context.get("test_mode") and node["id"] in context.get("fixtures", {}):
-            fixture = context["fixtures"][node["id"]]
+        fixture_id = "/".join(context.get("subflow_path", []) + [node["id"]])
+        if context.get("test_mode") and fixture_id in context.get("fixtures", {}):
+            fixture = context["fixtures"][fixture_id]
             if fixture['outcome'] not in outcomes(node):
                 raise ApplicationError('invalid_fixture_outcome')
             validate(fixture.get('output', {}), output_contract(node))
@@ -143,6 +155,9 @@ class WorkflowEngine:
             except ApplicationError:
                 value = None
             expected = cfg.get("value"); operator = cfg["operator"]
+            if operator == "contains" and (isinstance(value, str) and not isinstance(expected, str) or
+                    isinstance(value, dict) and isinstance(expected, (list, dict))):
+                raise ApplicationError("invalid_condition_operand")
             matched = (value == expected if operator == "eq" else value != expected if operator == "ne" else
                        value is not None if operator == "exists" else
                        expected in value if operator == "contains" and isinstance(value, (str, list, dict)) else
@@ -190,6 +205,7 @@ class WorkflowEngine:
             table = await self.service.table(context, cfg["resource"])
             rows = table["rows"]
             if kind == "identity.resolve":
+                context.pop("identity", None)
                 country = table["metadata"]["country_code"]
                 phone = normalized_phone(context.get("caller", {}).get("phone"), country)
                 matched = [r for r in rows if phone and r.get("phone") == phone]
@@ -197,12 +213,14 @@ class WorkflowEngine:
                 if len(ids) == 1:
                     row = matched[0]
                     context["identity"] = {"resident_id": row["resident_id"], "name": row["name"],
-                                           "customer_id": row.get("customer_id"), "resource_id": cfg["resource"]["resource_id"], "verified": True}
-                    return "known", {"resident_id": row["resident_id"], "name": row["name"], "verified": True}
+                                           "customer_id": row.get("customer_id"), "resource_id": cfg["resource"]["resource_id"], "verified": False, "assurance": "cli"}
+                    return "known", {"resident_id": row["resident_id"], "name": row["name"], "verified": False}
                 return "unknown", {"verified": False}
             if kind == "identity.verify":
-                self.service.verification_attempt(context, cfg["resource"])
+                context.pop("identity", None)
                 name = normalized_name(args.get("name", "")); code = args.get("resident_code", "")
+                residents = sorted({r["resident_id"] for r in rows if name and matching_name(name, r["name_key"], cfg.get("name_match", "exact"))})
+                await self.service.verification_attempt(context, cfg["resource"], canonical(residents) if residents else name)
                 matched = [r for r in rows if name and r.get("verification_code") and isinstance(code, str) and
                            hmac.compare_digest(r["verification_code"].encode(), code.encode()) and
                            matching_name(name, r['name_key'], cfg.get('name_match','exact'))]
@@ -224,7 +242,7 @@ class WorkflowEngine:
             matched = [r for r in rows if r["resident_id"] == identity["resident_id"] and r["period"] == period]
             if len(matched) != 1:
                 return "ambiguous" if matched else "not_found", {}
-            return "found", {"row": safe_row(matched[0]), "source": cfg["resource"], "source_row": matched[0]["source_row"]}
+            return "found", {"row": safe_row(matched[0]), "source": table.get("reference", cfg["resource"]), "source_row": matched[0]["source_row"]}
         if kind == "data.name_match":
             import regex
             name = normalized_name(args.get("name", ""))
@@ -256,5 +274,8 @@ class WorkflowEngine:
                 context["deadline_monotonic"] = outer_deadline
                 context['permissions'] = outer_permissions
                 context['subflow_path'] = outer_path
+            context["child_traces"].extend(result["trace"])
+            if result["status"] != "completed":
+                raise ApplicationError("subflow_" + result["status"], 409)
             return "success", result["result"]
         raise ApplicationError("unknown_block")

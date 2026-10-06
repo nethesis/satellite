@@ -16,9 +16,9 @@ host or supplies credentials inside graph JSON.
 | PUT | `/definitions/{agent\|subflow}/{id}` | `{definition, expected_revision}` → `{revision}`; 0 creates a draft |
 | GET | `/definitions/{kind}/{id}/versions/{version}` | `{definition}` for an immutable publication |
 | POST | `/validate` | `{definition}` → `{valid, tools}`; structural and live reference checks |
-| POST | `/definitions/{kind}/{id}/publish` | `{expected_revision}` → `{version, revision, execution_hash}` |
+| POST | `/definitions/{kind}/{id}/publish` | `{expected_revision}` → `{version, revision, execution_hash}` plus PBX sync status for an agent |
 | POST | `/definitions/{kind}/{id}/activate` | `{version, enabled, expected_revision}` → activation plus PBX sync status for a voice agent |
-| POST | `/test` | `{definition, fixtures, input, caller, tables?, destinations?}` → labelled mock result and bounded trace; never performs external effects |
+| POST | `/test` | `{definition, fixtures, input, caller, tables?, destinations?, subflows?}` → labelled mock result and bounded trace; never performs external effects |
 | GET | `/runs/{id}` | Pinned graph, status, safe step metadata, subflow paths and effect states; result content excluded |
 | POST | `/runs/{id}/cancel` | Requests cancellation; current voice run returns through its PBX fallback |
 | PUT | `/data/{id}` | `{settings, expected_revision}` → `{revision}` |
@@ -32,6 +32,22 @@ IDs use `[a-z][a-z0-9_-]{0,47}`; `internal`, `external` and `support-request` ar
 reserved agent IDs. Draft writes, publication and activation use optimistic
 revision checks. Definition/graph size is 128 KiB; uploads are at most 10 MiB,
 with a 14 MiB JSON request ceiling for base64 transfer.
+
+Saving a draft does not change the active workflow or reload the PBX.
+Publication selects the new active version and keeps the current enabled state.
+Agent publication reconciles its PBX binding immediately. When a binding changes,
+the gateway marks the configuration for reload and starts `retrieveHelper.sh`.
+Activation also applies the binding and starts the reload. Failed binding sync
+returns `pbx_sync.pending`; the existing five-minute timer retries reconciliation.
+
+## PBX data endpoint
+
+Satellite reads company contacts and answered-call history through the module's
+`/satellite/agent-workflow-data.php` endpoint (also under `/freepbx/satellite/`).
+It accepts local, bearer-authenticated POST requests for `pbx.contacts` and
+`pbx.history` only. Database access uses the read-only `satellite_workflow` account.
+The original `/freepbx/agent-workflow-data.php` URL remains an Apache alias for
+existing Satellite runtime images; no redirect or second PHP entrypoint is used.
 
 ## Canonical definitions and bindings
 
@@ -52,7 +68,14 @@ Publication checks connector/subflow schemas as well as the block manifests.
 
 Connector references are `{connector_id, version, operation_id}` and their
 canonical grant ID is `connector.<id>.<operation>.v<version>`. Resource/subflow
-references are `{resource_id, version}`. All versions are immutable. Selecting a
+references are `{resource_id, version}`. All published versions are immutable. Data references may also use
+`version: "latest"`; the runtime resolves all such references at run start,
+including references in immutable subflows, and pins the resolved versions for
+that run. Successful unchanged refreshes update freshness without creating new
+versions. Failed attempts have a separate retry timestamp and do not extend data
+freshness. Keep integer versions when a graph must always use one exact table.
+The store retains three recent versions plus every explicitly referenced version;
+persisted run references protect versions used by active executions. Per-resource capacity is 64 MiB. Selecting a
 published operation in the editor does not enable its grant automatically.
 
 Initial limits: 100 nodes, 200 edges, 200 executions of steps across nested
@@ -67,11 +90,14 @@ applies the child graph deadline; the default ten-second operation timeout does
 not wrap the entire reusable graph. Parent permissions, path and deadline are
 restored when the child completes, fails or is cancelled.
 
-A mock fixture keyed by node ID has `{outcome, output}`; conversation fixtures
+A mock fixture keyed by `subflow_path/node_id` (just node ID at the root) has `{outcome, output}`; conversation fixtures
 use the conversation's declared output fields. Mock tables contain synthetic
 normalized rows, creation time and country-code metadata. Fixtures are validated
 against known block outputs/outcomes. Results include `test_mode: "mock"` and
-cannot authorize a real business write.
+cannot authorize a real business write. Supply reusable graphs in `subflows`
+keyed by resource ID. Built-in hours require fixtures; mock verification does not
+consume the real verification budget. A child fallback uses the parent subflow’s
+error port (`subflow_fallback`); it does not produce a success result.
 
 ## Machine API compatibility
 
@@ -120,3 +146,17 @@ node. Provider/private consultation content is not stored as ordinary metadata.
 Restart/restore interrupts unfinished owners and marks dispatched effects
 unknown. Unknown writes and uncertain call releases are never automatically
 replayed. The existing reconciliation surface remains available for effects.
+
+## Payment identity and verification
+
+Caller ID can identify a candidate resident, but is not verification. A matching
+CLI sets `verified: false` with CLI assurance; `data.lookup` requires successful
+code verification for the same data resource. The payment template asks every
+caller for name and code. Names alone cannot authorize disclosure. New codes
+must have at least six characters. Keep identifier columns as text to preserve
+leading zeroes. Native numeric amounts are independent of the text decimal locale.
+
+Verification attempts are persisted per call, matched resident and resource.
+The limits are five attempts per call/resident in ten minutes and 100 per resource
+in one minute. Withheld caller IDs have separate call budgets. Rotating caller ID,
+restarting the service and running mock tests cannot reset a resident’s budget.

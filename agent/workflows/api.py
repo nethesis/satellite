@@ -73,6 +73,11 @@ def create_workflow_router(service):
             for node in draft['nodes']:
                 if not isinstance(node, dict) or not all(isinstance(node.get(key), str) for key in ('id','name','type')) or not isinstance(node.get('config'), dict) or not isinstance(node.get('inputs'), dict):
                     raise ApplicationError('invalid_draft')
+            for edge in draft['edges']:
+                if not isinstance(edge, dict) or not all(isinstance(edge.get(key), str) for key in ('source', 'target', 'outcome')):
+                    raise ApplicationError('invalid_draft')
+            if draft.get('provider_binding_ref') is not None and not isinstance(draft['provider_binding_ref'], str):
+                raise ApplicationError('invalid_draft')
             return await service.db("workflow_save", kind, agent_id, draft, value["expected_revision"], actor)
         return await guarded(actor, update)
 
@@ -109,14 +114,19 @@ def create_workflow_router(service):
     async def test(request: Request, actor=Depends(private)):
         async def execute():
             value = await body(request, 262144)
-            fields(value, ("definition", "fixtures", "input", "caller"), ("tables", "destinations"))
+            fields(value, ("definition", "fixtures", "input", "caller"), ("tables", "destinations", "subflows"))
             graph = definition(value["definition"])
             if not all(isinstance(value[k], dict) for k in ("fixtures", "input", "caller")):
                 raise ApplicationError("invalid_test_input")
             for key, fixture in value["fixtures"].items():
                 if not isinstance(fixture, dict) or not isinstance(fixture.get("outcome"), str):
                     raise ApplicationError("invalid_fixture")
-            result = await service.test(graph, value["fixtures"], value["input"], value["caller"], value.get("tables"), value.get("destinations"))
+            subflows = value.get("subflows", {})
+            if not isinstance(subflows, dict) or len(subflows) > 20:
+                raise ApplicationError("invalid_test_input")
+            for key, child in subflows.items():
+                identifier(key); definition(child, subflow=True)
+            result = await service.test(graph, value["fixtures"], value["input"], value["caller"], value.get("tables"), value.get("destinations"), subflows)
             return result | {"test_mode": "mock"}
         return await guarded(actor, execute)
 
@@ -140,6 +150,7 @@ def create_workflow_router(service):
                     break
             if run_id in service.active:
                 service.active[run_id]["cancellation"].set()
+                service.active[run_id]["task"].cancel()
             return {"cancel_requested": True}
         return await guarded(actor, update)
 

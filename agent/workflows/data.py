@@ -223,9 +223,15 @@ def normalize_table(values, cfg):
                 raise ValueError("missing_value")
             if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", row["period"]) or not re.fullmatch(r"[A-Z]{3}", row["currency"]):
                 raise ValueError("invalid_period_or_currency")
+            native = {field: cells[position] if position < len(cells) else None for field, position in positions.items()}
+            for field in ("verification_code", "phone", "resident_id", "customer_id", "unit"):
+                if field in native and native[field] is not None and not isinstance(native[field], str):
+                    raise ValueError("identifier_requires_text")
             amount_text = row["amount"]
             # An explicit locale avoids interpreting thousands/decimal separators heuristically.
-            if cfg["decimal_separator"] == ",":
+            if isinstance(native["amount"], (int, float, Decimal)) and not isinstance(native["amount"], bool):
+                amount_text = str(native["amount"])
+            elif cfg["decimal_separator"] == ",":
                 amount_text = amount_text.replace(".", "").replace(",", ".")
             elif "," in amount_text:
                 raise ValueError("invalid_decimal_separator")
@@ -233,6 +239,8 @@ def normalize_table(values, cfg):
             if not amount.is_finite() or amount < 0 or amount > Decimal("10000000") or amount != amount.quantize(Decimal("0.01")):
                 raise ValueError("invalid_amount")
             row["amount"] = format(amount.quantize(Decimal("0.01")), "f")
+            if row.get("verification_code") and len(row["verification_code"]) < 6:
+                raise ValueError("verification_code_too_short")
             row["phone"] = normalized_phone(row.get("phone"), cfg["country_code"])
             row["name_key"] = normalized_name(row["name"])
             row["source_row"] = index

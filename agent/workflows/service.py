@@ -77,7 +77,7 @@ class Workflows:
                         inventory = await self.db("workflow_inventory")
                         for resource in inventory["data_sources"]:
                             interval = resource["settings"].get("refresh_seconds", 0)
-                            if resource["settings"]["format"] in ("google_sheets", "google_csv") and interval and resource["published_version"] and time.time() - (resource["last_refresh"] or 0) >= interval:
+                            if resource["settings"]["format"] in ("google_sheets", "google_csv") and interval and resource["published_version"] and time.time() - (resource.get("last_attempt") or resource["last_refresh"] or 0) >= interval:
                                 try:
                                     await self.refresh_sheet(resource["resource_id"], resource["revision"], "system")
                                 except ApplicationError:
@@ -111,28 +111,36 @@ class Workflows:
                    "entrypoints": ["voice"], "configuration_url": "/freepbx/admin/config.php?display=satellite_agents&tab=" + key}
                   for key, p in payload.get("profiles", {}).items()]
         for row in inventory["definitions"]:
-            draft = row["draft"]
-            active_graph = await self.db('workflow_version', row['kind'], row['agent_id'], row['active_version']) if row['active_version'] else draft
-            bound = next((d for d in payload.get("destinations", []) if d.get("workflow_agent_id") == row["agent_id"] and d.get("workflow_version") == row["active_version"]), None)
-            status = "draft" if not row["published_version"] else "disabled" if not row["enabled"] else "pending_sync" if row['kind'] == 'agent' and "voice" in active_graph["entrypoints"] and not bound else "ready"
-            tools = self.tool_preview(active_graph)
-            reason = None
             try:
-                definition(active_graph, subflow=row['kind'] == 'subflow')
-                await self.db('workflow_validate', active_graph)
-            except ApplicationError as exc:
-                reason = exc.code
-            if row['kind'] == 'agent' and 'voice' in active_graph['entrypoints'] and active_graph.get('provider_binding_ref') not in bindings:
-                reason = reason or 'provider_unconfigured'
-            for tool in tools:
-                if reason or not tool['available']:
-                    tool.update({'available': False, 'reason': reason or 'ungranted_tool'})
-            if row['enabled'] and reason:
-                status = 'invalid'
-            agents.append({"agent_id": row["agent_id"], "name": draft["name"], "description": draft.get("description", ""), "kind": row["kind"],
-                           "status": status, "enabled": row["enabled"], "revision": row["revision"], "version": row["active_version"],
-                           "entrypoints": active_graph["entrypoints"], "tools": tools,
-                           "provider": bindings.get(active_graph.get("provider_binding_ref"), {}).get("provider"), "draft": draft})
+                draft = row["draft"]
+                active_graph = await self.db('workflow_version', row['kind'], row['agent_id'], row['active_version']) if row['active_version'] else draft
+                bound = next((d for d in payload.get("destinations", []) if d.get("workflow_agent_id") == row["agent_id"] and d.get("workflow_version") == row["active_version"]), None)
+                status = "draft" if not row["published_version"] else "disabled" if not row["enabled"] else "pending_sync" if row['kind'] == 'agent' and "voice" in active_graph["entrypoints"] and not bound else "ready"
+                tools = self.tool_preview(active_graph)
+                reason = None
+                try:
+                    definition(active_graph, subflow=row['kind'] == 'subflow')
+                    await self.db('workflow_validate', active_graph)
+                except ApplicationError as exc:
+                    reason = exc.code
+                if row['kind'] == 'agent' and 'voice' in active_graph['entrypoints'] and active_graph.get('provider_binding_ref') not in bindings:
+                    reason = reason or 'provider_unconfigured'
+                for tool in tools:
+                    if reason or not tool['available']:
+                        tool.update({'available': False, 'reason': reason or 'ungranted_tool'})
+                if row['enabled'] and reason:
+                    status = 'invalid'
+                agents.append({"agent_id": row["agent_id"], "name": draft["name"], "description": draft.get("description", ""), "kind": row["kind"],
+                               "status": status, "enabled": row["enabled"], "revision": row["revision"], "version": row["active_version"],
+                               "entrypoints": active_graph["entrypoints"], "tools": tools,
+                               "provider": bindings.get(active_graph.get("provider_binding_ref"), {}).get("provider"), "draft": draft})
+            except Exception:
+                draft = row.get("draft") if isinstance(row.get("draft"), dict) else {}
+                agents.append({"agent_id": row["agent_id"], "name": draft.get("name") if isinstance(draft.get("name"), str) else row["agent_id"],
+                    "description": "", "kind": row["kind"], "status": "invalid", "enabled": row["enabled"],
+                    "revision": row["revision"], "version": row["active_version"], "entrypoints": [],
+                    "tools": [], "provider": None, "draft": draft, "error_code": "invalid_draft"})
+
         routing = [{key: target[key] for key in ("id", "type", "name", "description", "synonyms", "internal_allowed", "external_allowed") if key in target} | {"ready": True} for target in payload.get("directory", [])]
         routing.extend({"id": "agent:" + agent["agent_id"], "name": agent["name"], "type": "agent", "ready": agent["status"] == "ready"} for agent in agents if agent["kind"] != "subflow")
         return inventory | {"agents": agents, "connector_operations":operations, "routing_objects": routing, "blocks": BLOCKS, "bindings": [{"id": key, "name": "#" + key + " " + item["provider"]} for key, item in bindings.items()], "health": {"available": self.available}}
@@ -165,9 +173,9 @@ class Workflows:
         row = await self.db("execution", context["run_id"])
         if row["cancel_requested"]:
             raise ApplicationError("cancelled", 409)
-        for ref in context.get("resource_refs", []):
+        for ref in context.get("resource_refs", {}).values():
             await self.db("data_live", ref["resource_id"], ref["version"])
-        for ref in context.get('subflow_refs', []):
+        for ref in context.get('subflow_refs', {}).values():
             await self.db('subflow_version', ref['resource_id'], ref['version'])
         if context.get("execution_kind") == "api":
             await self.application.db("client", context["principal"])
@@ -202,29 +210,56 @@ class Workflows:
             raise ApplicationError("confirmation_capability_unavailable", 403)
         return await context["confirm_action"](prompt)
 
+    async def prepare_data(self, graph, context):
+        resources = set()
+        fixed_refs = set()
+        seen = set()
+        async def collect(current):
+            for node in current["nodes"]:
+                if node["type"] in ("data.lookup", "identity.resolve", "identity.verify"):
+                    ref = node["config"]["resource"]
+                    if ref["version"] == "latest": resources.add(ref["resource_id"])
+                    else: fixed_refs.add((ref["resource_id"], ref["version"]))
+                elif node["type"] == "subflow":
+                    ref = node["config"]["resource"]
+                    key = (ref["resource_id"], ref["version"])
+                    if key not in seen:
+                        seen.add(key)
+                        await collect(await self.db("subflow_version", *key))
+        await collect(graph)
+        context["latest_data"] = await self.db("data_latest_versions", resources, context.get("run_id"), list(fixed_refs)) if resources or fixed_refs else {}
+
     async def table(self, context, ref):
         if context.get("test_mode"):
             table = context.get("tables", {}).get(ref["resource_id"])
             if table is None:
                 raise ApplicationError("table_fixture_required")
             return table
-        context.setdefault("resource_refs", []).append(ref)
-        return await self.db("data_rows", ref["resource_id"], ref["version"], self.application.key)
+        freshness = None
+        if ref["version"] == "latest":
+            pinned = context["latest_data"][ref["resource_id"]]
+            ref = {"resource_id": ref["resource_id"], "version": pinned["version"]}
+            freshness = pinned["last_refresh"]
+        context.setdefault("resource_refs", {})[(ref["resource_id"], ref["version"])] = ref
+        cache = context.setdefault("data_tables", {})
+        key = (ref["resource_id"], ref["version"])
+        if key not in cache:
+            cache[key] = await self.db("data_rows", *key, self.application.key)
+            cache[key]["reference"] = ref
+            if freshness is not None: cache[key]["created"] = freshness
+        return cache[key]
 
-    def verification_attempt(self, context, ref):
-        key = (ref["resource_id"], context.get("caller", {}).get("phone") or context.get("principal"))
-        now = time.monotonic(); attempts, started = self._verification.get(key, (0, now))
-        if now - started > 600:
-            attempts, started = 0, now
-        if attempts >= 5:
-            raise ApplicationError("verification_attempts_exhausted", 429)
-        self._verification[key] = (attempts + 1, started)
-        self._verification.move_to_end(key)
-        if len(self._verification) > 2048:
-            self._verification.popitem(last=False)
+    async def verification_attempt(self, context, ref, resident):
+        if context.get("test_mode"):
+            return
+        await self.db("verification_attempt", ref["resource_id"], context["run_id"], resident)
 
     async def subflow(self, context, ref):
-        context.setdefault('subflow_refs', []).append(ref)
+        if context.get('test_mode'):
+            child = context.get('subflows', {}).get(ref['resource_id'])
+            if child is None: raise ApplicationError('subflow_fixture_required')
+            return child
+        context.setdefault('subflow_refs', {})[(ref['resource_id'], ref['version'])] = ref
         return await self.db('subflow_version', ref['resource_id'], ref['version'])
 
     async def destinations(self, context, cfg):
@@ -269,6 +304,8 @@ class Workflows:
         return await handler(args.get("destination_id"), str(args.get("summary", ""))[:1000], cfg)
 
     async def builtin(self, context, name, args, node_id):
+        if context.get("test_mode"):
+            raise ApplicationError("builtin_fixture_required")
         result = await self.runtime.tools.dispatch(name, args, f"wf-{context['run_id']}-{context['step_count']}-{node_id}", context)
         if "error" in result:
             raise ApplicationError("builtin_tool_failed")
@@ -286,12 +323,12 @@ class Workflows:
         if context.get("test_mode"):
             raise ApplicationError("pbx_fixture_required")
         # This fixed local capability is separate from configurable HTTP tools.
-        token = os.getenv("API_TOKEN", "")
+        token = os.getenv("SATELLITE_PBX_DATA_TOKEN", "")
         port = os.getenv('APACHE_PORT', '')
         if not token or not port.isdigit() or not 1 <= int(port) <= 65535:
             raise ApplicationError("pbx_data_unavailable", 503)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), trust_env=False) as client:
-            async with client.post("http://127.0.0.1:" + port + "/freepbx/agent-workflow-data.php", headers={"Authorization": "Bearer " + token},
+            async with client.post("http://127.0.0.1:" + port + "/freepbx/satellite/agent-workflow-data.php", headers={"Authorization": "Bearer " + token},
                 json={"operation": kind, "input": args, "settings": cfg}, allow_redirects=False) as response:
                 from agent.application.http import bounded_json
                 raw = await response.content.read(65537)
@@ -462,9 +499,9 @@ class Workflows:
                 if not call.terminal:
                     await self.runtime._finish(call, code, fallback=True)
 
-    async def test(self, graph, fixtures, inputs, caller, tables=None, destinations=None):
+    async def test(self, graph, fixtures, inputs, caller, tables=None, destinations=None, subflows=None):
         context = {"run_id": uuid.uuid4().hex, "agent_id": graph["agent_id"], "execution_kind": "voice" if graph["entrypoints"] == ["voice"] else "api",
-                   "test_mode": True, "fixtures": fixtures, "caller": caller, "tables": tables or {}, "destinations": destinations or [],
+                   "test_mode": True, "fixtures": fixtures, "caller": caller, "tables": tables or {}, "destinations": destinations or [], "subflows": subflows or {},
                    "deadline_monotonic": time.monotonic() + 10}
         return await self.engine.execute(graph, context, inputs)
 

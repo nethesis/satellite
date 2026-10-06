@@ -35,7 +35,9 @@ CONVERSATION = obj({"prompt": TEXT, "output_schema": {"type": "object"},
 CATALOG = obj({"defaults": obj({k: {"type": "boolean"} for k in ("extension", "queue", "ivr", "agent")}),
                "overrides": {"type": "object", "additionalProperties": {"type": "boolean"}},
                "delegations": {"type": "object", "additionalProperties": IDS}})
-TABLE = obj({"resource": REF, "max_age_seconds": {"type": "integer", "minimum": 60, "maximum": 31536000}}, ["resource"])
+DATA_REF = copy.deepcopy(REF)
+DATA_REF["properties"]["version"] = {"oneOf": [{"type": "integer", "minimum": 1}, {"const": "latest"}]}
+TABLE = obj({"resource": DATA_REF, "max_age_seconds": {"type": "integer", "minimum": 60, "maximum": 31536000}}, ["resource"])
 VERIFY_TABLE = copy.deepcopy(TABLE)
 VERIFY_TABLE['properties']['name_match'] = {'type':'string','enum':['exact','similar'],'description':'Similar accepts spacing differences and one character edit; the resident code must still match exactly.'}
 BLOCKS = [
@@ -219,6 +221,8 @@ def definition(value, *, subflow=False, input_schemas=None, output_schemas=None)
     parents = {key: set() for key in nodes}; children = {key: [] for key in nodes}; seen = set()
     for edge in value["edges"]:
         fields(edge, ("source", "outcome", "target"))
+        if any(not isinstance(edge[key], str) for key in ("source", "outcome", "target")):
+            raise DefinitionError("invalid_edge")
         if edge["source"] not in nodes or edge["target"] not in nodes:
             raise DefinitionError("dangling_edge")
         if edge["outcome"] not in outcomes(nodes[edge["source"]]):

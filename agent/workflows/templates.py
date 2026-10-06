@@ -47,17 +47,17 @@ def templates():
         node("fallback", "end", {"status": "fallback"}),
     ], [("call", "success", "destinations"), ("destinations", "success", "choose"), ("choose", "pbx", "route_pbx"),
         ("choose", "agent", "route_agent"), ("choose", "fallback", "fallback"), ("route_pbx", "unavailable", "fallback"), ("route_agent", "unavailable", "fallback")])
-    resource = {"resource_id": "payments", "version": 1}
+    resource = {"resource_id": "payments", "version": "latest"}
     secretary = graph("payment-secretary", "Payment secretary", [
         node("call", "start.call"), node("identify", "identity.resolve", {"resource": resource}),
-        node("ask_identity", "conversation.collect", conversation("Collect the resident's full name including surname and resident verification code. Explain why an unknown caller needs the code. Once both values are stated, immediately finish this step; the next step verifies them. Return spoken numeric codes as ASCII digit strings without spaces (spoken zero one becomes 01), preserving leading zeroes. Do not attempt to verify the code yourself or ask again for values already supplied.",
+        node("ask_identity", "conversation.collect", conversation("Collect the resident's full name including surname and resident verification code. Explain that a verification code is required before disclosing payment details. Once both values are stated, immediately finish this step; the next step verifies them. Return spoken numeric codes as ASCII digit strings without spaces (spoken zero one becomes 01), preserving leading zeroes. Do not attempt to verify the code yourself or ask again for values already supplied.",
             {"name": TEXT, "resident_code": TEXT})),
         node("verify", "identity.verify", {"resource": resource, "name_match":"similar"}, {"name": source("ask_identity", "name"), "resident_code": source("ask_identity", "resident_code")}),
         node("period", "conversation.collect", conversation("Ask which payment month the caller needs. Return the month as YYYY-MM; clarify the year if needed.", {"period": {"type": "string", "maxLength": 7}})),
         node("payment", "data.lookup", {"resource": resource, "max_age_seconds": 2678400}, {"period": source("period", "period")}),
         node("answer", "conversation.speak", {"text": "Tell the caller this exact payment, including month and currency: {{row}}. Do not calculate another amount."}, {"row": source("payment", "row")}),
         node("done", "end"), node("fallback", "end", {"status": "fallback"}),
-    ], [("call", "success", "identify"), ("identify", "known", "period"), ("identify", "unknown", "ask_identity"),
+    ], [("call", "success", "identify"), ("identify", "known", "ask_identity"), ("identify", "unknown", "ask_identity"),
         ("ask_identity", "success", "verify"), ("verify", "verified", "period"), ("verify", "denied", "fallback"),
         ("period", "success", "payment"), ("payment", "found", "answer"), ("payment", "not_found", "fallback"),
         ("payment", "ambiguous", "fallback"), ("payment", "stale", "fallback"), ("answer", "success", "done")])

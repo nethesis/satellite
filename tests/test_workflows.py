@@ -110,7 +110,7 @@ def test_text_regex_extraction_and_timeout():
 async def test_known_payment_caller_only_receives_own_row():
     runtime = AgentRuntime(); service = runtime.workflows
     rows, _ = ingest(CSV, payment_settings())
-    result = await service.test(templates()[1], {'period':{'outcome':'success','output':{'period':'2026-10'}}}, {},
+    result = await service.test(templates()[1], {'ask_identity':{'outcome':'success','output':{'name':'Mario Rossi','resident_code':'secret1'}}, 'period':{'outcome':'success','output':{'period':'2026-10'}}}, {},
         {'phone':'+393331234567'}, {'payments':{'rows':rows,'created':time.time(),'metadata':{'country_code':'39'}}})
     assert result['status'] == 'completed'
     lookup = next(step for step in result['trace'] if step['node_id'] == 'payment')
@@ -138,7 +138,7 @@ async def test_unknown_payment_caller_requires_code_and_ambiguous_phone_does_not
 @pytest.mark.asyncio
 async def test_stale_payment_snapshot_falls_back():
     service=AgentRuntime().workflows; rows,_=ingest(CSV,payment_settings())
-    result=await service.test(templates()[1],{'period':{'outcome':'success','output':{'period':'2026-10'}}},{},
+    result=await service.test(templates()[1],{'ask_identity':{'outcome':'success','output':{'name':'Mario Rossi','resident_code':'secret1'}}, 'period':{'outcome':'success','output':{'period':'2026-10'}}},{},
         {'phone':'+393331234567'}, {'payments':{'rows':rows,'created':0,'metadata':{'country_code':'39'}}})
     assert result['status']=='fallback'
 
@@ -253,7 +253,7 @@ async def test_subflow_reduces_permissions_uses_own_definition_and_restores_pare
     child['text_provider']={'model':'fixture','secret_ref':'child-key'}
     parent=graph('parent-block','Parent',[node('start','start.api'),node('child','subflow',{'resource':{'resource_id':'child-block','version':1}}),node('done','end',inputs={'message':source('child','message')})],[('start','success','child'),('child','success','done')])
     parent['entrypoints']=['api'];parent['output_schema']=child['output_schema']
-    service=AgentRuntime().workflows;service.check=AsyncMock();service.subflow=AsyncMock(return_value=child)
+    service=AgentRuntime().workflows;service.prepare_data=AsyncMock();service.check=AsyncMock();service.subflow=AsyncMock(return_value=child)
     observed=[]
     async def step(context,sequence,node,status,*args):
         observed.append((node['id'],list(context.get('subflow_path',[]))))
@@ -281,7 +281,7 @@ async def test_subflow_speech_uses_graph_deadlines(child_limit, parent_remaining
         node('child', 'subflow', {'resource': {'resource_id': 'long-block', 'version': 1}}),
         node('done', 'end')], [('start', 'success', 'child'), ('child', 'success', 'done')])
     service = AgentRuntime().workflows
-    service.check = AsyncMock(); service.step = AsyncMock(); service.subflow = AsyncMock(return_value=child)
+    service.prepare_data = AsyncMock(); service.check = AsyncMock(); service.step = AsyncMock(); service.subflow = AsyncMock(return_value=child)
     async def speak(context, text):
         await asyncio.sleep(10.1)
     service.speak = speak
