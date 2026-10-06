@@ -158,8 +158,8 @@ class _RealtimeAdapter:
         async with self._respond_lock:
             async with self._condition:
                 await self._condition.wait_for(lambda: self._closed or (
-                    not self._pending and not self._audio_playing and
-                    (self._response_done if token == "greeting" else token in self._done_responses)))
+                    not self._pending and not self._audio_playing and self._response_done and
+                    (token == "greeting" or token in self._done_responses)))
                 if self._closed:
                     raise ProviderError(f"{self.provider} sideband closed")
             event = {"type": "response.create"}
@@ -179,6 +179,14 @@ class _RealtimeAdapter:
             else:
                 self._event_ready.clear()
                 await self._event_ready.wait()
+
+    async def workflow_input(self, inputs):
+        # Caller speech and connector outputs remain conversation data.
+        await self._send({"type": "conversation.item.create", "item": {
+            "type": "message", "role": "user", "content": [{
+                "type": "input_text", "text": "Workflow step data:\n" + json.dumps(inputs, ensure_ascii=False)
+            }]
+        }})
 
     async def workflow_update(self, instructions, tools, *, auto_response=True):
         """Change the current workflow step without changing the voice/model."""
@@ -367,7 +375,7 @@ class _RealtimeAdapter:
             await self._observation({"type": "transcript_failed"})
             return
         if kind == "error":
-            await self._emit({"type": "error", "code": "provider_event_error"})
+            await self._emit({"type": "error", "code": (raw.get("error") or {}).get("code", "provider_event_error")})
         if kind == "response.created":
             async with self._condition:
                 self._response_generation += 1

@@ -52,11 +52,11 @@ MQTT_TOPIC_PREFIX=satellite
 # Deepgram API Key
 DEEPGRAM_API_KEY=your_deepgram_api_key
 
-# REST API (optional)
+# REST API (listens on loopback by default)
+HTTP_HOST=127.0.0.1
 HTTP_PORT=8000
 
-# REST API Authentication (optional)
-# When set, all /api/* endpoints require an auth header.
+# REST API Authentication (required for /api/*)
 API_TOKEN=your_static_api_token
 
 # OpenAI API Key (optional)
@@ -97,12 +97,13 @@ PGVECTOR_DATABASE=satellite
 
 #### Rest API Configuration
 - `HTTP_PORT`: Port for the HTTP server (default: 8000)
-- `API_TOKEN`: Optional static token for `/api/*` endpoints. If unset/empty, auth is disabled.
+- `HTTP_HOST`: HTTP listen address. Defaults to `127.0.0.1`.
+- `API_TOKEN`: Required for `/api/*`. An unset or blank server token returns `503`; invalid request credentials return `401`.
 
 #### Built-in Satellite Agent
 - `SATELLITE_AGENT_ARI_APP`: Separate Agent Stasis application (default: `satellite-agent`). The transcription application continues to use `ARI_APP`.
 - `SATELLITE_AGENT_STATE_PATH`: Optional persistent path for the accepted configuration revision and webhook receipt hashes. This file contains no provider credentials.
-- `API_TOKEN`: Required for `/api/agent/v1/*` and for built-in call readiness. The existing API retains its optional-token behavior.
+- `API_TOKEN`: Required for `/api/agent/v1/*` and for built-in call readiness. The legacy `/api/*` surface also requires authentication.
 
 The built-in voice runtime runs in the same process and event loop as the HTTP API. It can run without `DEEPGRAM_API_KEY`; transcription and RTP/MQTT services remain optional. FreePBX sends complete versioned configuration to `PUT /api/agent/v1/configuration` and current directory/calendar data to `PUT /api/agent/v1/context`. Calls entering `Stasis(satellite-agent,caller,...)` are matched to a pinned destination and provider binding. The runtime originates a retained `Local/...@satellite-agent-provider/n` leg and bridges it after the signed provider event is correlated and both legs are ready.
 
@@ -165,8 +166,8 @@ curl -X POST http://127.0.0.1:8000/api/get_transcription \
 ```
 
 Authentication:
-- If `API_TOKEN` is set, all `/api/*` endpoints require `Authorization: Bearer <token>` (or `X-API-Token: <token>`).
-- If `API_TOKEN` is unset/empty, auth is disabled (backwards compatible default).
+- All `/api/*` endpoints require `Authorization: Bearer <token>` (or `X-API-Token: <token>`).
+- If `API_TOKEN` is unset or blank, all `/api/*` requests return `503`.
 
 If `persist=true` and `PGVECTOR_*` is configured, the raw transcription is saved to Postgres.
 Each persisted request creates or updates its own transcript row by internal `id`; repeated `uniqueid` values are allowed for multi-fragment call recordings.
@@ -241,7 +242,7 @@ curl -X POST http://127.0.0.1:8000/api/get_speech \
 
 Notes:
 - Text is split into 2000-character chunks (Deepgram input limit) and each chunk is synthesized sequentially; the resulting MP3 parts are concatenated.
-- Errors: `400` for missing text, `401` if `API_TOKEN` is set and auth is missing/invalid, `504` on Deepgram timeout, `502` if Deepgram is unreachable.
+- Errors: `400` for missing text, `401` for missing/invalid credentials, `503` when the server token is unset, `504` on Deepgram timeout, `502` if Deepgram is unreachable.
 
 ## Architecture
 
@@ -401,3 +402,35 @@ pytest tests/test_workflows.py tests/test_workflow_voice.py tests/test_workflow_
 These tests use mock providers and a local WebSocket emulator. They do not call
 OpenAI or a production PBX. Database and PBX integration tests remain in the
 [NethVoice module repository](https://github.com/nethesis/ns8-nethvoice/tree/agent/satellite/tests).
+
+## Agent deployment and review fixes
+
+The NS8 listener uses loopback and host networking. Traefik publishes only
+`/agents-api/v1` for authenticated machine clients. Keep `/api/*`, provider event
+forwarding, monitoring, configuration and workflow administration private. Tokens
+belong in headers. Query-string credentials are not accepted.
+
+`SATELLITE_PBX_DATA_TOKEN` is a separate credential for the local PBX contacts
+and history endpoint. NS8 creates and repairs it and rejects forwarded requests.
+The transcription supervisor retries startup with a 1–30 second backoff. Its
+shutdown hook closes ARI, MQTT and RTP before Uvicorn finishes shutdown.
+
+Payment caller ID is an identification hint. Every caller must provide a matching
+resident name and verification code before a payment lookup. New verification
+codes must contain at least six characters. Store codes, phone numbers, resident
+IDs, customer IDs and unit numbers as text. Native numeric amounts use their
+numeric value; the decimal separator applies only to text cells.
+
+Data references can select an integer version or `version: "latest"`. Latest
+references, including references in reusable blocks, resolve at run start and
+stay fixed for that run. An unchanged successful Sheet refresh updates freshness
+without adding a version. Failed refresh attempts do not make old data fresh.
+Old unreferenced versions are pruned; explicit graph references and active runs
+retain their versions. Each resource is limited to 64 MiB within the 256 MiB store.
+
+The container runs as UID/GID 1001. NS8 assigns its private state volume to that
+user on startup. Runtime dependencies and the Python base version are pinned.
+Build and test the corrected Satellite image before selecting its digest in
+NethVoice's `SATELLITE_RUNTIME_IMAGE` build setting. API contracts and Satellite
+unit/acceptance tests are maintained in this repository under `docs/agents/` and
+`tests/`. NethVoice keeps its PBX integration tests and acceptance runners.

@@ -57,7 +57,7 @@ def create_router(runtime, api_token: str | None = None) -> APIRouter:
             raise HTTPException(status_code=503, detail="agent_api_unconfigured")
         header = request.headers.get("authorization", "")
         scheme, _, supplied = header.partition(" ")
-        if scheme.lower() != "bearer" or not supplied or not hmac.compare_digest(supplied, token):
+        if scheme.lower() != "bearer" or not supplied or not hmac.compare_digest(supplied.encode(), token.encode()):
             raise HTTPException(status_code=401, detail="unauthorized",
                                 headers={"WWW-Authenticate": "Bearer"})
 

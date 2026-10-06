@@ -28,11 +28,23 @@ def signal_handler():
     shutdown_event.set()
 
 
-def _report_transcription_exit(task):
-    if task.cancelled():
-        return
-    if task.exception() is not None:
-        logger.error("Transcription pipeline stopped: %s", type(task.exception()).__name__)
+async def supervise_transcription():
+    delay = 1
+    while not shutdown_event.is_set():
+        try:
+            await realtime_call_transcription()
+            if shutdown_event.is_set():
+                return
+            logger.error("Transcription pipeline stopped")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Transcription pipeline stopped: %s", type(exc).__name__)
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), delay)
+        except asyncio.TimeoutError:
+            delay = min(delay * 2, 30)
+
 
 async def realtime_call_transcription():
     # exit if deepgram api key is not set
@@ -120,25 +132,27 @@ async def realtime_call_transcription():
 async def main():
     # Keep the control plane alive independently of optional transcription.
     server = uvicorn.Server(uvicorn.Config(
-        api_app, host="0.0.0.0", port=int(os.getenv("HTTP_PORT", "8000")),
+        api_app, host=os.getenv("HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1", port=int(os.getenv("HTTP_PORT", "8000")),
         log_level=os.getenv("LOG_LEVEL", "info").lower()))
     transcription = None
     enabled = os.getenv("SATELLITE_CALL_TRANSCRIPTION_ENABLED")
     if (enabled is None or enabled.lower() == "true") and os.getenv("DEEPGRAM_API_KEY"):
-        transcription = asyncio.create_task(realtime_call_transcription())
-        transcription.add_done_callback(_report_transcription_exit)
-    try:
-        await server.serve()
-    finally:
+        transcription = asyncio.create_task(supervise_transcription())
+    async def stop_transcription():
         shutdown_event.set()
         if transcription:
             try:
-                await asyncio.wait_for(transcription, timeout=10)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(transcription), timeout=10)
+            except asyncio.TimeoutError:
                 transcription.cancel()
                 await asyncio.gather(transcription, return_exceptions=True)
-            except Exception:
-                logger.error("Transcription pipeline stopped")
+
+    # Uvicorn runs shutdown hooks before restoring and re-raising SIGTERM.
+    api_app.add_event_handler("shutdown", stop_transcription)
+    try:
+        await server.serve()
+    finally:
+        await stop_transcription()
 
 if __name__ == "__main__":
     asyncio.run(main())

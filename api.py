@@ -11,6 +11,7 @@ import subprocess
 import sys
 import shutil
 import tempfile
+import secrets
 from deepgram import DeepgramClient, SpeakOptions
 from deepgram.clients.common.v1.errors import DeepgramApiError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -210,10 +211,10 @@ def _tts_chunk_to_bytes_sync(text: str, options: SpeakOptions) -> bytes:
     return response.stream_memory.read()
 
 
-def _require_api_token_if_configured(request: Request) -> None:
+async def _require_api_token(request: Request) -> None:
     configured_token = (os.getenv("API_TOKEN") or "").strip()
     if not configured_token:
-        return
+        raise HTTPException(status_code=503, detail="API authentication unavailable")
 
     provided_token = None
 
@@ -224,7 +225,7 @@ def _require_api_token_if_configured(request: Request) -> None:
     if not provided_token:
         provided_token = (request.headers.get("x-api-token") or "").strip() or None
 
-    if not provided_token or provided_token != configured_token:
+    if not provided_token or not secrets.compare_digest(provided_token.encode(), configured_token.encode()):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized",
@@ -234,7 +235,7 @@ def _require_api_token_if_configured(request: Request) -> None:
 
 api_router = APIRouter(
     prefix="/api",
-    dependencies=[Depends(_require_api_token_if_configured)],
+    dependencies=[Depends(_require_api_token)],
 )
 
 def _run_call_processor(

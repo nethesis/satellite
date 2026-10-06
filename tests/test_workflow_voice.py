@@ -95,7 +95,7 @@ async def test_early_operator_digit_and_cancelled_caller_do_not_commit():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('fail', [False, True])
+@pytest.mark.parametrize('fail', [False, True, 'update'])
 async def test_agent_switch_replaces_only_provider_and_preserves_external_origin(fail):
     call=call_fixture();call.workflow_context_data={'step_count':5,'global_max_steps':200}; graph=templates()[1];graph['provider_binding_ref']='2'
     snapshot={'destinations':[{'id':43,'agent_type':'workflow','workflow_agent_id':'payment-secretary','workflow_version':1}],
@@ -105,7 +105,8 @@ async def test_agent_switch_replaces_only_provider_and_preserves_external_origin
     runtime.workflows.db=AsyncMock(return_value={'version':1,'definition':graph})
     runtime.application.voice_bindings=AsyncMock(return_value=[])
     runtime.calls[call.session_id]=call;runtime.by_caller[call.caller_id]=call.session_id;runtime.by_local[call.local_id]=call.session_id
-    if fail: runtime.controller.originate_local.side_effect=RuntimeError('fixture originate failed')
+    if fail == 'update': call.adapter.workflow_update.side_effect=RuntimeError('fixture sideband closed')
+    elif fail: runtime.controller.originate_local.side_effect=RuntimeError('fixture originate failed')
     try:
         if fail:
             with pytest.raises(RuntimeError): await runtime.workflow_route_agent(call,'payment-secretary',{},[])
@@ -125,6 +126,9 @@ async def test_agent_switch_replaces_only_provider_and_preserves_external_origin
             runtime.controller.continue_channel.assert_not_awaited()
         assert all(item.args[0]!=call.caller_id for item in runtime.controller.hangup.await_args_list)
         call.adapter.close.assert_awaited_once()
+        call.adapter.hangup.assert_awaited_once_with(call.provider_call_id)
+        runtime.controller.destroy_bridge.assert_any_await(call.bridge_id)
+        runtime.controller.hangup.assert_any_await(call.local_id)
         assert call.terminal and call.handed_off
     finally:
         for task in list(runtime._tasks): task.cancel()

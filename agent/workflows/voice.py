@@ -113,7 +113,8 @@ class VoiceWorkflows:
                 call.private_consultation = True
                 await self.runtime.controller.add_to_bridge(attempt.bridge_id, [call.local_id, attempt.channel_id])
                 await call.adapter.workflow_update("You are speaking privately to the operator. Summarize only the supplied issue and ask them to press 1 to accept or 2 to decline. Do not repeat any private operator speech to the caller.", [], auto_response=False)
-                await call.adapter.workflow_respond(summary + " Press 1 to accept this caller or 2 to decline.", wait=True)
+                await call.adapter.workflow_input({"summary": summary, "decision_prompt": "Press 1 to accept this caller or 2 to decline."})
+                await call.adapter.workflow_respond(wait=True)
                 attempt.accepting = True
                 outcome = await asyncio.wait_for(attempt.decision, cfg["consult_seconds"])
                 if outcome == "accepted" and (call.terminal or attempt.destroyed):
