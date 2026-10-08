@@ -197,6 +197,7 @@ class Acceptance(unittest.IsolatedAsyncioTestCase):
 
     async def test_database_failure_keeps_event_loop_and_recovers(self):
         m=self.monitor; m._initialized=False
+        self.addAsyncCleanup(m.stop)
         with patch.dict(os.environ,{"PGVECTOR_PORT":"1"}):
             await m.start()
             start=time.monotonic()
@@ -205,13 +206,17 @@ class Acceptance(unittest.IsolatedAsyncioTestCase):
                     timestamp=time.time(),event_type="phase3_test"))
                 await asyncio.sleep(.001)
             self.assertLess(time.monotonic()-start,1)
+            # Pool acquisition times out asynchronously; keep the failed port
+            # selected until the writer reports that failure.
+            deadline=time.monotonic()+5
+            while m.health()["error_code"] != "storage_unavailable" and time.monotonic()<deadline:
+                await asyncio.sleep(.05)
             self.assertEqual(m.health()["error_code"],"storage_unavailable")
         deadline=time.monotonic()+15
         while (not m.health()["available"] or m._queue) and time.monotonic()<deadline:
             await asyncio.sleep(.05)
         self.assertTrue(m.health()["available"])
         self.assertEqual(len(m._queue),0)
-        await m.stop()
 
     async def test_private_api_authorization_bounds_and_cache(self):
         from fastapi import FastAPI
@@ -227,9 +232,15 @@ class Acceptance(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization":"Bearer phase3-test-token"}
             self.assertEqual(client.get(root+"/runs?limit=101",headers=headers).status_code,422)
             self.assertEqual(client.get(root+"/runs?cursor=!!",headers=headers).status_code,400)
-            response=client.get(root+"/runs/"+c.run_id+"/transcript",headers=headers)
+            transcript_url=root+"/runs/"+c.run_id+"/transcript"
+            self.assertEqual(client.get(transcript_url,headers=headers).status_code,400)
+            self.assertEqual(client.get(transcript_url,headers=headers | {"X-Monitoring-Actor":"invalid actor"}).status_code,400)
+            response=client.get(transcript_url,headers=headers | {"X-Monitoring-Actor":"phase3-test"})
             self.assertEqual(response.status_code,200)
             self.assertEqual(response.headers["Cache-Control"],"no-store")
+            with self.repo.connect() as db:
+                audit=db.execute("SELECT actor,action,run_id FROM agent_monitoring.audit").fetchall()
+            self.assertEqual(audit,[dict(actor="phase3-test",action="transcript_read",run_id=c.run_id)])
             self.assertEqual(client.get(root+"/runs/"+c.run_id,headers=headers).json()["status"],"unknown")
             self.assertEqual(client.delete(root+"/runs/"+c.run_id+"/transcript",headers=headers).status_code,400)
 
