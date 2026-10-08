@@ -21,6 +21,9 @@ Payload keys:
   `permissions` (scope -> allow/deny), `tools` (tool ID -> enabled/disabled),
   `max_call_duration_seconds`, `fallback_destination` (string/null), `company`
   (structured fields), and `calendar_services` (service -> calendar ID).
+  For OpenAI bindings, a `model` beginning with `gpt-live-` selects GPT-Live.
+  Other models and empty values retain Realtime behavior. API selection is pinned
+  at admission and does not change the binding's `provider: openai` identity.
 - `bindings`: array of `{id: <string>, provider: openai|grok,
   runtime_owner: builtin, trunk_name: AgentTrunk_<id>, provider_user,
   provider_host, api_key, webhook_secret}`. Only built-in bindings are exported.
@@ -55,6 +58,14 @@ webhook-signature}}`. Both PHP and Satellite verify the original provider
 signature/timestamp. Satellite matches its pre-existing pending session/leg.
 Return `{status: accepted|duplicate|ignored}` only after responsibility is taken.
 An event can never create a session without a matching ARI admission.
+
+OpenAI accepts `realtime.call.incoming` (`data.call_id`) for Realtime profiles,
+and `live.transport.incoming` (`data.type: sip`, `data.session_id`) for Live
+profiles. Legacy `live.call.incoming` deliveries are also accepted for Live.
+Wrong-API notifications are ignored before claiming a receipt or provider ID.
+This permits both subscriptions on one project without accepting a call twice.
+Live uses the session ID unchanged for `/v1/live/sessions/{id}/accept`,
+`wss://api.openai.com/v1/live/sessions/{id}/attach`, and `/{id}/hangup`.
 
 ## Voice admission
 
@@ -102,13 +113,25 @@ Directory/company/calendar handlers do not require ARI/provider objects.
 ToolRegistry, EventSink, ARI controller and provider factory. `agent.api.create_router`
 mounts routes using this object. One event loop owns runtime sessions/locks.
 
-Provider factory `create_adapter(binding)` returns an adapter with async
+Provider factory `create_adapter(binding, profile=None)` returns an adapter with async
 `accept(provider_call_id, profile, tools)`, `connect(provider_call_id)`,
 `send_result(invocation_id, result)`, `respond(instructions=None, response_id=None)`, `close()`,
 `hangup(provider_call_id)` and `events()` async iterator. Session update/accept
 sequencing stays provider-specific. `verify_webhook(secret, raw_body, headers)`
 returns the parsed authenticated object or raises ValueError; it enforces a
 300-second timestamp window and supports multiple v1 signatures.
+
+The Live adapter uses managed Responses delegation with `gpt-6-luna`, the same
+project API key, and `parallel_tool_calls: false`. Existing tool policy and
+dispatch remain in Satellite. Function calls come from nested
+`response.output_item.done`, not argument deltas or the empty completion output.
+Results use `response.item.create`; continuation uses `response.create` once
+all required results have been submitted. Tool wire names change with each
+workflow step to reject late calls against stale instructions.
+Frontend language/delegation instructions are separate from backend business
+instructions. No SDK dependency or new credential/configuration field is needed.
+See the official [Live SIP](https://developers.openai.com/api/docs/guides/voice-sip)
+and [delegation](https://developers.openai.com/api/docs/guides/live-delegation) guides.
 
 ## Tools
 

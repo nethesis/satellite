@@ -58,6 +58,27 @@ Required top-level fields are `schema_version`, `agent_id`, `name`, `description
 an API model and encrypted credential ID. Resource/operation references live in
 the typed node configurations rather than a second top-level resource list.
 
+On an OpenAI binding, `voice_settings.model: gpt-live-1` selects GPT-Live;
+`gpt-realtime` selects Realtime. An omitted voice model inherits the external
+profile, as before. Both APIs may share one provider binding. The text-provider
+settings for API entrypoints do not select the Live delegated backend.
+
+Live conversation steps advance on the existing validated completion tool when
+the required data is ready. Deterministic action nodes still enforce grants,
+exact-argument confirmation and durable effects. A model cannot approve a write.
+Speech-only steps use an internal, step-specific tool to prepare their message;
+the runtime submits it to Live and waits for command acceptance. This is semantic
+prompt readiness, not proof that audio has finished or been heard. Caller DTMF
+confirmation is armed after readiness; Realtime retains its audio-drain gate.
+Both modes reject digits received before their gate and retain confirmation
+expiry and argument binding.
+
+Operator DTMF remains separate. After a private Live summary, a declined or
+failed consultation replaces only the provider leg before reconnecting the
+caller. It preserves the run, graph version, permissions, step budget and
+deadline, and excludes private conversation from the new session. The caller
+remains on hold during replacement; setup failure follows the normal fallback.
+
 Each node has `id`, `type`, `version`, `name`, `config` and `inputs`. Each edge is
 `{source, outcome, target}`. Input bindings are a literal `{value: ...}` or a
 restricted selection `{node: "source_id", path: "row.amount"}`. An optional branch

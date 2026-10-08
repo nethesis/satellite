@@ -17,7 +17,7 @@ from agent.context import allowed, tool_enabled, visible
 from agent.events import EventSink
 from agent.monitoring import Monitoring
 from agent.models import AgentUnavailable, InvalidInvocation, PermissionDenied
-from agent.providers import create_adapter
+from agent.providers import create_adapter, uses_live
 from agent.providers.webhook import verify_webhook
 from agent.tools import ToolRegistry
 
@@ -89,6 +89,7 @@ class Call:
     private_consultation: bool = False
     handoff_depth: int = 0
     parent_run_id: str | None = None
+    provider_replacement: asyncio.Future | None = None
 
     def transition(self, expected, new):
         if self.state != expected:
@@ -481,7 +482,7 @@ class AgentRuntime:
             try:
                 await self.controller.create_bridge(bridge_id)
                 await self.controller.add_to_bridge(bridge_id, [call.caller_id, call.local_id])
-                if call.parent_run_id:
+                if call.parent_run_id or call.provider_replacement is not None:
                     await self.controller.moh(call.caller_id, False)
             except Exception:
                 # No nested lock acquisition; cleanup runs after leaving this block.
@@ -493,6 +494,8 @@ class AgentRuntime:
                     call.setup_timer.cancel()
                 self.events.emit("call_conversing", session_id=call.session_id,
                                  run_id=call.run_id)
+                if call.provider_replacement is not None and not call.provider_replacement.done():
+                    call.provider_replacement.set_result(None)
                 if call.workflow and call.adapter and call.workflow_task is None:
                     call.greeting_started = True
                     call.workflow_task = self._spawn(self.workflows.run_voice(call, call.workflow, call.workflow_version, call.workflow_context_data.get("initial_input", {})))
@@ -549,7 +552,8 @@ class AgentRuntime:
             verified_calls.append(candidate)
         if event is None:
             raise PermissionDenied("invalid provider signature")
-        if event.get("type") != "realtime.call.incoming":
+        event_type = event.get("type")
+        if event_type not in ("realtime.call.incoming", "live.transport.incoming", "live.call.incoming"):
             return {"status": "ignored"}
         sip = self._sip_headers(event)
         session_id = sip.get("x-os-session-id")
@@ -561,7 +565,18 @@ class AgentRuntime:
                 sip.get("x-os-agent-id") != call.destination_id or
                 sip.get("x-os-destination-id") != call.destination_id):
             return {"status": "ignored"}
-        provider_call_id = (event.get("data") or {}).get("call_id")
+        data = event.get("data") or {}
+        live = uses_live(call.binding, call.profile)
+        if live:
+            if event_type not in ("live.transport.incoming", "live.call.incoming"):
+                return {"status": "ignored"}
+            if event_type == "live.transport.incoming" and data.get("type") != "sip":
+                return {"status": "ignored"}
+            provider_call_id = data.get("session_id")
+        else:
+            if event_type != "realtime.call.incoming":
+                return {"status": "ignored"}
+            provider_call_id = data.get("call_id")
         event_id = event.get("id")
         if not isinstance(provider_call_id, str) or not provider_call_id or not event_id:
             return {"status": "ignored"}
@@ -585,7 +600,7 @@ class AgentRuntime:
 
     async def _start_provider(self, call):
         try:
-            adapter = self.adapter_factory(call.binding)
+            adapter = self.adapter_factory(call.binding, call.profile)
             call.adapter = adapter
             context = self._context(call)
             tools = self.tools.provider_tools(context)
@@ -619,6 +634,9 @@ class AgentRuntime:
                     if not call.private_consultation:
                         self.monitoring.transcript(call, event)
                 elif kind == "response_done" and call.workflow_step:
+                    if (event.get("generation") is not None and
+                            event["generation"] != getattr(call.adapter, "_generation", None)):
+                        continue
                     step = call.workflow_step
                     self._workflow_turn(step, event.get('response_id'))
                     if step["turns"] >= step["max_turns"] and not event.get("has_tool_calls") and not step["future"].done():
@@ -713,6 +731,66 @@ class AgentRuntime:
         if isinstance(response_id, str) and response_id != step.get('prior_response_id'):
             step.setdefault('responses', set()).add(response_id)
             step['turns'] = len(step['responses'])
+
+    async def replace_private_provider(self, call):
+        """Discard Live's private conversation before restoring caller audio.
+
+        Keep the admitted call, graph, task, approvals and deadlines. Only the
+        provider leg is replaced; no private history is seeded into its session.
+        """
+        async with call.lock:
+            if call.terminal or call.state != CallState.CONSULTING:
+                raise AgentUnavailable("call_not_consulting")
+            old_adapter, old_provider = call.adapter, call.provider_call_id
+            old_local, old_bridge = call.local_id, call.bridge_id
+            old_task = call.provider_task
+            self.by_local.pop(old_local, None)
+            call.leg_id = secrets.token_urlsafe(24)
+            call.local_id = "agent-" + secrets.token_hex(12)
+            self.by_local[call.local_id] = call.session_id
+            call.adapter = call.provider_task = call.provider_call_id = None
+            call.provider_ready = call.local_answered = False
+            call.bridge_id = None
+            call.transition(CallState.CONSULTING, CallState.WAITING_PROVIDER)
+            call.provider_replacement = asyncio.get_running_loop().create_future()
+        async def release_private():
+            if old_task:
+                old_task.cancel()
+                await asyncio.gather(old_task, return_exceptions=True)
+            # Release every old resource even if one individual cleanup fails.
+            for cleanup in (lambda: old_adapter.hangup(old_provider), old_adapter.close,
+                            lambda: self.controller.hangup(old_local),
+                            lambda: self.controller.destroy_bridge(old_bridge)):
+                try:
+                    await asyncio.wait_for(cleanup(), 5)
+                except Exception:
+                    self._error("Could not release private provider resource")
+        releasing = asyncio.create_task(release_private())
+        try:
+            try:
+                await asyncio.shield(releasing)
+            except asyncio.CancelledError:
+                await releasing
+                raise
+            if call.terminal:
+                raise AgentUnavailable("caller disconnected")
+            inherited = {"AGENT_SESSION_ID": call.session_id, "AGENT_PROVIDER_LEG_ID": call.leg_id,
+                "AGENT_ROLE": "caller", "AGENT_DESTINATION_ID": call.destination_id,
+                "AGENT_TYPE": "workflow", "AGENT_FLOW": call.flow,
+                "AGENT_PROVIDER_TRUNK": call.binding["trunk_name"],
+                "AGENT_PROVIDER_USER": call.binding["provider_user"],
+                "AGENT_PROVIDER_HOST": call.binding["provider_host"],
+                "AGENT_ROUTING_REVISION": call.payload_hash}
+            for key in ("AGENT_ORIGINAL_CALLER", "AGENT_ORIGINAL_CALLER_NAME", "AGENT_ORIGINAL_DID",
+                        "AGENT_LINKEDID", "AGENT_CALL_ORIGIN", "AGENT_EXTENSION"):
+                if call.caller_variables.get(key) is not None:
+                    inherited[key] = call.caller_variables[key]
+            async with asyncio.timeout(min(SETUP_SECONDS, max(0, call.deadline - time.monotonic()))):
+                await self.controller.originate_local(call.session_id, call.local_id,
+                    {"__" + key: value for key, value in inherited.items()})
+                await call.provider_replacement
+        finally:
+            call.provider_replacement = None
 
     async def workflow_route_agent(self, call, agent_id, inputs, scopes):
         from dataclasses import replace
@@ -822,6 +900,10 @@ class AgentRuntime:
             if call.terminal or invocation_id in call.seen_invocations:
                 return
             call.seen_invocations.add(invocation_id)
+        if (event.get("generation") is not None and
+                event["generation"] != getattr(call.adapter, "_generation", None)):
+            await call.adapter.send_result(invocation_id, {"error": "stale_workflow_tool"})
+            return
         if call.workflow:
             step = call.workflow_step
             if call.private_consultation or not step:
@@ -1058,6 +1140,11 @@ class AgentRuntime:
             except Exception:
                 self._error("Agent provider hangup failed")
             finally:
+                # The event consumer stops on terminal calls before Live's final
+                # usage arrives. Retain the bounded snapshot after hangup too.
+                usage = getattr(call.adapter, "usage_snapshot", None)
+                if isinstance(usage, dict):
+                    self.monitoring.enqueue("usage", {"run_id": call.run_id, "usage": usage})
                 try:
                     await asyncio.wait_for(call.adapter.close(), 5)
                 except Exception:

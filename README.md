@@ -364,9 +364,28 @@ display names, queue names and IVR names, plus configured descriptions and alias
 The model selects an approved destination ID; trusted PBX routing stays on the
 server. Disabling a tool or permission removes that capability from the prompt.
 
+### OpenAI Realtime and GPT-Live
+
+Voice agents support OpenAI Realtime and GPT-Live on the same OpenAI binding.
+Set the built-in profile `model` or workflow `voice_settings.model` to
+`gpt-live-1` for Live, or `gpt-realtime` for Realtime. An empty workflow override
+inherits the external profile. Existing stored models keep their behavior.
+Live uses the same project key and a managed `gpt-6-luna` Responses backend.
+Enable Live SIP for the project, retain the `realtime.call.incoming` webhook
+subscription, and add `live.transport.incoming`. The provider-facing media leg
+must support SRTP; the NethVoice proxy handles the external media negotiation.
+
+Live advances workflow steps through structured tools and semantic prompt
+readiness rather than audio-drain events. Configured DTMF confirmations and
+exact-argument write approvals still apply. A private consultation session is
+replaced before returning to the caller. See the maintained
+[workflow contract](docs/agents/workflow-api-contract.md) for these semantics.
+`tests/test_agent_live.py` exercises the Live protocol through local HTTP and
+WebSocket fixtures without provider credentials.
+
 ### Offline OpenAI protocol tests
 
-Run `pytest tests/test_agent_openai_emulator.py`. The local aiohttp simulator
+Run `pytest tests/test_agent_openai_emulator.py tests/test_agent_live.py`. The local aiohttp simulator
 emulates accept/hangup HTTP endpoints and the Realtime sideband WebSocket; signed
 `realtime.call.incoming` webhooks enter the real FastAPI route. Model tool answers
 arrive as `response.function_call_arguments.done` and `response.done` events.

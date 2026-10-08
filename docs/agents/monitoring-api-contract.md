@@ -1,5 +1,21 @@
 # Phase 3 monitoring contract
 
+GPT-Live retains `provider: openai`. With capture enabled, each Live transcript
+delta becomes an immutable history item; its text is preserved and its
+`start_ms` supplies the ordering position. These fragments are not completed
+turns or proof of playback. Disabling capture discards queued local fragments;
+Live's inherent remote transcript generation cannot be disabled by that flag.
+Private consultation fragments are excluded by the existing runtime gate.
+
+Live usage is stored in the existing JSON field as
+`{scope: latest_live_session, session_id, seconds, final, backend: {input_tokens,
+output_tokens, total_tokens}}`. Voice seconds are cumulative, not added across
+updates; backend tokens are counted once per response. `final` requires
+`session.closed`. A provider-session replacement starts a new measurement, so
+this field is not a total across all consultation sessions. Cleanup retains the
+last snapshot even after the runtime event consumer has stopped. No monitoring
+database migration is required.
+
 The Satellite agent runtime uses monitoring schema **2** for voice and API runs.
 API runs include definition, client and connector references. Transcripts apply
 only to voice runs. See the [application contract](phase4-api-contract.md).

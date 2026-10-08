@@ -100,7 +100,7 @@ async def harness(*, external=False, disabled=False, denied=False):
     if external:
         ari.vars['caller-1']['AGENT_CALL_ORIGIN'] = 'external'
         store.snapshot['profiles']['external']['permissions']['telephony.transfer.extension'] = 'deny'
-    def adapter(binding):
+    def adapter(binding, profile=None):
         value = OpenAIAdapter(binding)
         value.http_base = str(server.make_url('/v1/realtime')).rstrip('/')
         value.ws_base = str(server.make_url('/v1/realtime')).replace('http:', 'ws:')

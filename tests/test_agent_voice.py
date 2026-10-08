@@ -174,7 +174,7 @@ def setup(monkeypatch):
     ari = FakeAri()
     adapter = FakeAdapter()
     runtime = AgentRuntime(store=FakeStore(), tools=FakeTools(), events=FakeEvents(),
-                           controller=ari, adapter_factory=lambda binding: adapter)
+                           controller=ari, adapter_factory=lambda binding, profile=None: adapter)
     ari.owner = runtime
     runner.run(runtime.start())
     yield runner, runtime, ari, adapter

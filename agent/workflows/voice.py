@@ -64,7 +64,8 @@ class VoiceWorkflows:
     async def confirm(self, call, prompt):
         if call.caller_id in self.digits:
             raise ApplicationError("confirmation_in_progress", 409)
-        # Only digits received after read-back has finished can authorize this action.
+        # Realtime waits for audio drain; Live waits for its prompt readiness
+        # tool. Neither the model nor a readiness signal can approve the write.
         await self.runtime.workflow_speak(call, prompt + " Press 1 to confirm or 2 to decline.")
         future = asyncio.get_running_loop().create_future()
         self.digits[call.caller_id] = future
@@ -156,7 +157,9 @@ class VoiceWorkflows:
             outcome = "unknown" if call.handoff_attempt_id else "failed"
         finally:
             self.consultations.pop(attempt.channel_id, None)
-            call.private_consultation = False
+            replace_private = call.private_consultation and getattr(call.adapter, 'api', None) == 'live'
+            # Keep queued private Live transcripts suppressed during teardown.
+            call.private_consultation = bool(replace_private and not call.terminal)
             if not attempt.released:
                 try:
                     await self.runtime.controller.hangup(attempt.channel_id)
@@ -169,11 +172,16 @@ class VoiceWorkflows:
                     pass
             if moved and not call.terminal and not call.handoff_attempt_id:
                 try:
-                    await self.runtime.controller.add_to_bridge(call.bridge_id, [call.local_id])
-                    if muted:
-                        await self.runtime.controller.mute(call.local_id, False, 'out')
-                    await self.runtime.controller.moh(call.caller_id, False)
-                    call.state = CallState.CONVERSING; call.state_revision += 1
+                    if replace_private:
+                        # Never reconnect a still-speaking private Live session.
+                        await self.runtime.replace_private_provider(call)
+                        call.private_consultation = False
+                    else:
+                        await self.runtime.controller.add_to_bridge(call.bridge_id, [call.local_id])
+                        if muted:
+                            await self.runtime.controller.mute(call.local_id, False, 'out')
+                        await self.runtime.controller.moh(call.caller_id, False)
+                        call.state = CallState.CONVERSING; call.state_revision += 1
                     await call.adapter.workflow_update("Resume speaking to the original caller. The consultation did not connect. Do not disclose private operator speech.", [], auto_response=False)
                 except Exception:
                     await self.runtime._finish(call, "consultation_resume_failed", fallback=True)
