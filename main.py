@@ -148,7 +148,7 @@ async def main():
                 await asyncio.gather(transcription, return_exceptions=True)
 
     # Uvicorn runs shutdown hooks before restoring and re-raising SIGTERM.
-    api_app.add_event_handler("shutdown", stop_transcription)
+    api_app.router.add_event_handler("shutdown", stop_transcription)
     try:
         await server.serve()
     finally:

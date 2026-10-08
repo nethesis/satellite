@@ -225,15 +225,14 @@ async def test_entrypoint_retries_and_shuts_transcription_down_in_hook(monkeypat
     from pathlib import Path
     app = FastAPI()
     config = {}
-    hooks = []
-    app.add_event_handler = lambda event, hook: hooks.append(hook)
     def make_config(*args, **kwargs):
         config.update(kwargs)
     class Server:
         def __init__(self, config): pass
         async def serve(self):
-            await asyncio.sleep(1.05)
-            await hooks[-1]()
+            async with app.router.lifespan_context(app):
+                await asyncio.sleep(1.05)
+            assert cleaned
     for name, value in {
         'dotenv': SimpleNamespace(load_dotenv=lambda **kw: None),
         'uvicorn': SimpleNamespace(Config=make_config, Server=Server),
