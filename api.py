@@ -11,6 +11,7 @@ import subprocess
 import sys
 import shutil
 import tempfile
+import secrets
 from deepgram import DeepgramClient, SpeakOptions
 from deepgram.clients.common.v1.errors import DeepgramApiError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -210,10 +211,10 @@ def _tts_chunk_to_bytes_sync(text: str, options: SpeakOptions) -> bytes:
     return response.stream_memory.read()
 
 
-def _require_api_token_if_configured(request: Request) -> None:
+async def _require_api_token(request: Request) -> None:
     configured_token = (os.getenv("API_TOKEN") or "").strip()
     if not configured_token:
-        return
+        raise HTTPException(status_code=503, detail="API authentication unavailable")
 
     provided_token = None
 
@@ -224,7 +225,7 @@ def _require_api_token_if_configured(request: Request) -> None:
     if not provided_token:
         provided_token = (request.headers.get("x-api-token") or "").strip() or None
 
-    if not provided_token or provided_token != configured_token:
+    if not provided_token or not secrets.compare_digest(provided_token.encode(), configured_token.encode()):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized",
@@ -234,7 +235,7 @@ def _require_api_token_if_configured(request: Request) -> None:
 
 api_router = APIRouter(
     prefix="/api",
-    dependencies=[Depends(_require_api_token_if_configured)],
+    dependencies=[Depends(_require_api_token)],
 )
 
 def _run_call_processor(
@@ -714,3 +715,25 @@ async def get_transcription(
 
 
 app.include_router(api_router)
+
+
+# Agent sessions, locks and provider sockets all belong to FastAPI's event loop.
+from agent.runtime import AgentRuntime
+from agent.api import create_router
+agent_runtime = AgentRuntime()
+app.include_router(create_router(agent_runtime))
+from agent.monitoring.api import create_monitoring_router
+app.include_router(create_monitoring_router(agent_runtime))
+from agent.application.api import create_application_routers
+for application_router in create_application_routers(agent_runtime.application):
+    app.include_router(application_router)
+from agent.workflows.api import create_workflow_router
+app.include_router(create_workflow_router(agent_runtime.workflows))
+
+@app.on_event("startup")
+async def _start_agent_runtime():
+    await agent_runtime.start()
+
+@app.on_event("shutdown")
+async def _stop_agent_runtime():
+    await agent_runtime.stop()

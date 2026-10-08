@@ -10,14 +10,21 @@ import os
 
 
 @pytest.fixture(autouse=True)
-def _unset_api_token(monkeypatch):
-    """Ensure local env doesn't accidentally enable auth during tests."""
-    monkeypatch.delenv("API_TOKEN", raising=False)
+def _configure_api_token(monkeypatch):
+    """Give ordinary endpoint tests an authenticated API client."""
+    monkeypatch.setenv("API_TOKEN", "secret")
 
 
 @pytest.fixture
 def client():
     """Create a test client for the FastAPI app."""
+    from api import app
+    return TestClient(app, headers={"Authorization": "Bearer secret"})
+
+
+@pytest.fixture
+def unauthenticated_client():
+    """Create a test client without a default authorization header."""
     from api import app
     return TestClient(app)
 
@@ -76,9 +83,9 @@ class TestStartupSchemaInit:
 class TestGetTranscription:
     """Tests for the /api/get_transcription endpoint."""
 
-    def test_auth_enabled_missing_token_returns_401(self, client, valid_wav_content):
+    def test_auth_enabled_missing_token_returns_401(self, unauthenticated_client, valid_wav_content):
         with patch.dict(os.environ, {"API_TOKEN": "secret"}):
-            response = client.post(
+            response = unauthenticated_client.post(
                 "/api/get_transcription",
                 files={"file": ("test.wav", valid_wav_content, "audio/wav")},
                 data={"uniqueid": "1234567890.1234"},
@@ -86,9 +93,9 @@ class TestGetTranscription:
 
         assert response.status_code == 401
 
-    def test_auth_enabled_wrong_token_returns_401(self, client, valid_wav_content):
+    def test_auth_enabled_wrong_token_returns_401(self, unauthenticated_client, valid_wav_content):
         with patch.dict(os.environ, {"API_TOKEN": "secret"}):
-            response = client.post(
+            response = unauthenticated_client.post(
                 "/api/get_transcription",
                 headers={"Authorization": "Bearer wrong"},
                 files={"file": ("test.wav", valid_wav_content, "audio/wav")},
@@ -132,9 +139,9 @@ class TestGetTranscription:
 
         assert response.status_code == 200
 
-    def test_docs_not_protected_by_api_token(self, client):
+    def test_docs_not_protected_by_api_token(self, unauthenticated_client):
         with patch.dict(os.environ, {"API_TOKEN": "secret"}):
-            response = client.get("/docs")
+            response = unauthenticated_client.get("/docs")
 
         assert response.status_code == 200
 
@@ -568,6 +575,30 @@ class TestGetTranscription:
         assert "Failed to parse transcription response" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("configured_token", [None, "", "  "])
+@pytest.mark.parametrize(
+    "method,path,kwargs",
+    [
+        ("get", "/api/get_models", {}),
+        ("post", "/api/get_speech", {"data": {"text": "hello"}}),
+        ("post", "/api/get_transcription", {}),
+    ],
+)
+def test_api_fails_closed_without_server_token(
+    monkeypatch, unauthenticated_client, configured_token, method, path, kwargs
+):
+    if configured_token is None:
+        monkeypatch.delenv("API_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("API_TOKEN", configured_token)
+
+    response = getattr(unauthenticated_client, method)(
+        path, headers={"Authorization": "Bearer secret"}, **kwargs
+    )
+
+    assert response.status_code == 503
+
+
 class TestGetSpeech:
     """Tests for the /api/get_speech endpoint."""
 
@@ -588,15 +619,22 @@ class TestGetSpeech:
         assert models
         assert all(model.endswith("-it") for model in models)
 
-    def test_get_models_auth_enabled_requires_token(self, client):
+    def test_get_models_auth_enabled_requires_token(self, unauthenticated_client):
         with patch.dict(os.environ, {"API_TOKEN": "secret"}):
-            response = client.get("/api/get_models")
+            response = unauthenticated_client.get("/api/get_models")
 
         assert response.status_code == 401
 
     def test_get_models_auth_enabled_valid_token(self, client):
         with patch.dict(os.environ, {"API_TOKEN": "secret"}):
             response = client.get("/api/get_models", headers={"Authorization": "Bearer secret"})
+
+        assert response.status_code == 200
+
+    def test_get_models_accepts_x_api_token(self, unauthenticated_client):
+        response = unauthenticated_client.get(
+            "/api/get_models", headers={"X-API-Token": "secret"}
+        )
 
         assert response.status_code == 200
 

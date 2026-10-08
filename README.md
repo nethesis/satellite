@@ -17,8 +17,8 @@ If OpenAI API key is provided, it will be used to generate a summary of the tran
 
 - Python 3.12+
 - Asterisk PBX with ARI enabled
-- MQTT broker
-- Deepgram API key
+- MQTT broker and Deepgram API key for optional transcription
+- Provider API key and signed webhook binding for built-in voice agents
 
 ## Installation
 
@@ -52,11 +52,11 @@ MQTT_TOPIC_PREFIX=satellite
 # Deepgram API Key
 DEEPGRAM_API_KEY=your_deepgram_api_key
 
-# REST API (optional)
+# REST API (listens on loopback by default)
+HTTP_HOST=127.0.0.1
 HTTP_PORT=8000
 
-# REST API Authentication (optional)
-# When set, all /api/* endpoints require an auth header.
+# REST API Authentication (required for /api/*)
 API_TOKEN=your_static_api_token
 
 # OpenAI API Key (optional)
@@ -97,7 +97,19 @@ PGVECTOR_DATABASE=satellite
 
 #### Rest API Configuration
 - `HTTP_PORT`: Port for the HTTP server (default: 8000)
-- `API_TOKEN`: Optional static token for `/api/*` endpoints. If unset/empty, auth is disabled.
+- `HTTP_HOST`: HTTP listen address. Defaults to `127.0.0.1`.
+- `API_TOKEN`: Required for `/api/*`. An unset or blank server token returns `503`; invalid request credentials return `401`.
+
+#### Built-in Satellite Agent
+- `SATELLITE_AGENT_ARI_APP`: Separate Agent Stasis application (default: `satellite-agent`). The transcription application continues to use `ARI_APP`.
+- `SATELLITE_AGENT_STATE_PATH`: Optional persistent path for the accepted configuration revision and webhook receipt hashes. This file contains no provider credentials.
+- `API_TOKEN`: Required for `/api/agent/v1/*` and for built-in call readiness. The legacy `/api/*` surface also requires authentication.
+
+The built-in voice runtime runs in the same process and event loop as the HTTP API. It can run without `DEEPGRAM_API_KEY`; transcription and RTP/MQTT services remain optional. FreePBX sends complete versioned configuration to `PUT /api/agent/v1/configuration` and current directory/calendar data to `PUT /api/agent/v1/context`. Calls entering `Stasis(satellite-agent,caller,...)` are matched to a pinned destination and provider binding. The runtime originates a retained `Local/...@satellite-agent-provider/n` leg and bridges it after the signed provider event is correlated and both legs are ready.
+
+Build the runtime image with this Satellite source checkout as the container build context so the `agent/` package is included. The NS8 module repository consumes the resulting runtime image separately.
+
+Agent endpoints include `/readiness`, `/catalog/tools`, `/catalog/permissions`, `/provider-events/{openai|grok}`, and `/calls/{session_id}` control/status under `/api/agent/v1`. Provider events require the shared Bearer token and an independently valid provider webhook signature. The Agent API does not expose provider credentials. On setup failure the original caller returns to the generated FreePBX fallback; a committed basic handoff continues directly to a configured extension, queue, or IVR.
 
 #### Postgres Vectorstore Configuration
 If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` can persist the raw transcription to Postgres when the request includes `persist=true` and a valid `uniqueid`.
@@ -154,8 +166,8 @@ curl -X POST http://127.0.0.1:8000/api/get_transcription \
 ```
 
 Authentication:
-- If `API_TOKEN` is set, all `/api/*` endpoints require `Authorization: Bearer <token>` (or `X-API-Token: <token>`).
-- If `API_TOKEN` is unset/empty, auth is disabled (backwards compatible default).
+- All `/api/*` endpoints require `Authorization: Bearer <token>` (or `X-API-Token: <token>`).
+- If `API_TOKEN` is unset or blank, all `/api/*` requests return `503`.
 
 If `persist=true` and `PGVECTOR_*` is configured, the raw transcription is saved to Postgres.
 Each persisted request creates or updates its own transcript row by internal `id`; repeated `uniqueid` values are allowed for multi-fragment call recordings.
@@ -230,7 +242,7 @@ curl -X POST http://127.0.0.1:8000/api/get_speech \
 
 Notes:
 - Text is split into 2000-character chunks (Deepgram input limit) and each chunk is synthesized sequentially; the resulting MP3 parts are concatenated.
-- Errors: `400` for missing text, `401` if `API_TOKEN` is set and auth is missing/invalid, `504` on Deepgram timeout, `502` if Deepgram is unreachable.
+- Errors: `400` for missing text, `401` for missing/invalid credentials, `503` when the server token is unset, `504` on Deepgram timeout, `502` if Deepgram is unreachable.
 
 ## Architecture
 
@@ -335,3 +347,109 @@ podman run -e ASTERISK_URL -e MQTT_URL -e DEEPGRAM_API_KEY ... satellite
 
 ## License
 This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for details.
+
+## Agent runtime on the `agent` branch
+
+The image `ghcr.io/nethesis/satellite:agent` includes voice agents, encrypted
+monitoring history, and configurable business connectors with an OpenAI Responses
+text executor. Existing transcription and MQTT interfaces remain compatible.
+See [monitoring API](docs/agents/monitoring-api-contract.md),
+[application API](docs/agents/phase4-api-contract.md) and
+[workflow API](docs/agents/workflow-api-contract.md) for configuration, capture
+controls, permissions, scoped API clients and deployment requirements.
+
+Enabled tools are appended to the effective provider instructions automatically.
+Call transfer includes only permitted, visible destinations with native extension
+display names, queue names and IVR names, plus configured descriptions and aliases.
+The model selects an approved destination ID; trusted PBX routing stays on the
+server. Disabling a tool or permission removes that capability from the prompt.
+
+### OpenAI Realtime and GPT-Live
+
+Voice agents support OpenAI Realtime and GPT-Live on the same OpenAI binding.
+Set the built-in profile `model` or workflow `voice_settings.model` to
+`gpt-live-1` for Live, or `gpt-realtime` for Realtime. An empty workflow override
+inherits the external profile. Existing stored models keep their behavior.
+Live uses the same project key and a managed `gpt-6-luna` Responses backend.
+Enable Live SIP for the project, retain the `realtime.call.incoming` webhook
+subscription, and add `live.transport.incoming`. The provider-facing media leg
+must support SRTP; the NethVoice proxy handles the external media negotiation.
+
+Live advances workflow steps through structured tools and semantic prompt
+readiness rather than audio-drain events. Configured DTMF confirmations and
+exact-argument write approvals still apply. A private consultation session is
+replaced before returning to the caller. See the maintained
+[workflow contract](docs/agents/workflow-api-contract.md) for these semantics.
+`tests/test_agent_live.py` exercises the Live protocol through local HTTP and
+WebSocket fixtures without provider credentials.
+
+### Offline OpenAI protocol tests
+
+Run `pytest tests/test_agent_openai_emulator.py tests/test_agent_live.py`. The local aiohttp simulator
+emulates accept/hangup HTTP endpoints and the Realtime sideband WebSocket; signed
+`realtime.call.incoming` webhooks enter the real FastAPI route. Model tool answers
+arrive as `response.function_call_arguments.done` and `response.done` events.
+The suite tests all built-in functions, named extension/queue/IVR transfers,
+duplicate delivery, authentication, replay/correlation, denied capabilities,
+invalid requests, external permission limits and ARI transfer failures.
+It uses a fake ARI client and synthetic configuration; no SIP call, production
+credentials or OpenAI account is required.
+
+`test_application_acceptance.py` and `test_monitoring_acceptance.py` guard their
+storage tests with explicit isolated database host names and acceptance flags.
+Never point these destructive fixture tests at an existing database.
+
+### Agent workflows
+
+The runtime executes published block graphs for voice and API agents. Templates
+include a call router, customer support and a payment secretary. Connectors,
+data sources and reusable blocks use pinned published versions. The payment
+secretary supports text, CSV, XLSX, private Google Sheets and published Google CSV.
+Consultative transfer requires operator acceptance before connecting the caller.
+
+Use the NethVoice Builder to configure and publish a graph. Test with synthetic
+fixtures first. Ask for confirmation before a final OpenAI test. Mock tests make
+no provider calls and do not appear as live history runs. For an approved live
+test, check the run status and each block outcome in the graph trace.
+
+Run the local workflow regressions with:
+
+```sh
+pytest tests/test_workflows.py tests/test_workflow_voice.py tests/test_workflow_provider.py
+```
+
+These tests use mock providers and a local WebSocket emulator. They do not call
+OpenAI or a production PBX. Database and PBX integration tests remain in the
+[NethVoice module repository](https://github.com/nethesis/ns8-nethvoice/tree/agent/satellite/tests).
+
+## Agent deployment and review fixes
+
+The NS8 listener uses loopback and host networking. Traefik publishes only
+`/agents-api/v1` for authenticated machine clients. Keep `/api/*`, provider event
+forwarding, monitoring, configuration and workflow administration private. Tokens
+belong in headers. Query-string credentials are not accepted.
+
+`SATELLITE_PBX_DATA_TOKEN` is a separate credential for the local PBX contacts
+and history endpoint. NS8 creates and repairs it and rejects forwarded requests.
+The transcription supervisor retries startup with a 1–30 second backoff. Its
+shutdown hook closes ARI, MQTT and RTP before Uvicorn finishes shutdown.
+
+Payment caller ID is an identification hint. Every caller must provide a matching
+resident name and verification code before a payment lookup. New verification
+codes must contain at least six characters. Store codes, phone numbers, resident
+IDs, customer IDs and unit numbers as text. Native numeric amounts use their
+numeric value; the decimal separator applies only to text cells.
+
+Data references can select an integer version or `version: "latest"`. Latest
+references, including references in reusable blocks, resolve at run start and
+stay fixed for that run. An unchanged successful Sheet refresh updates freshness
+without adding a version. Failed refresh attempts do not make old data fresh.
+Old unreferenced versions are pruned; explicit graph references and active runs
+retain their versions. Each resource is limited to 64 MiB within the 256 MiB store.
+
+The container runs as UID/GID 1001. NS8 assigns its private state volume to that
+user on startup. Runtime dependencies and the Python base version are pinned.
+Build and test the corrected Satellite image before selecting its digest in
+NethVoice's `SATELLITE_RUNTIME_IMAGE` build setting. API contracts and Satellite
+unit/acceptance tests are maintained in this repository under `docs/agents/` and
+`tests/`. NethVoice keeps its PBX integration tests and acceptance runners.

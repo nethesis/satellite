@@ -3,16 +3,13 @@ import logging
 import os
 import signal
 from dotenv import load_dotenv
-import threading
+load_dotenv(dotenv_path=".env")
 import uvicorn
 from api import app as api_app
 from asterisk_bridge import AsteriskBridge
 from mqtt_client import MQTTClient
 from rtp_server import RTPServer
 
-
-# Load environment variables
-load_dotenv(dotenv_path=".env")
 
 # Configure logging
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -30,16 +27,30 @@ def signal_handler():
     logger.info("Shutdown signal received")
     shutdown_event.set()
 
+
+async def supervise_transcription():
+    delay = 1
+    while not shutdown_event.is_set():
+        try:
+            await realtime_call_transcription()
+            if shutdown_event.is_set():
+                return
+            logger.error("Transcription pipeline stopped")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Transcription pipeline stopped: %s", type(exc).__name__)
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), delay)
+        except asyncio.TimeoutError:
+            delay = min(delay * 2, 30)
+
+
 async def realtime_call_transcription():
     # exit if deepgram api key is not set
     if not os.getenv("DEEPGRAM_API_KEY"):
         logger.error("DEEPGRAM_API_KEY is not set")
         return
-
-    # Set up signal handlers for graceful shutdown
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, signal_handler)
 
     # Check for Google Cloud credentials
     credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -97,33 +108,51 @@ async def realtime_call_transcription():
         elif action == "stop":
             await asterisk_bridge.stop_transcription(call_id)
 
-    # Start services
+    # Start services. A startup failure or cancellation still releases the RTP
+    # socket and any partially opened MQTT/ARI connection.
     logger.info("Starting services...")
-    mqtt_client.set_callback(handle_mqtt_control)
-    await mqtt_client.connect()
-    await mqtt_client.subscribe("transcription/control")
-    await asterisk_bridge.connect()
-    logger.info("All services started")
+    try:
+        mqtt_client.set_callback(handle_mqtt_control)
+        await mqtt_client.connect()
+        await mqtt_client.subscribe("transcription/control")
+        await asterisk_bridge.connect()
+        logger.info("All services started")
+        await shutdown_event.wait()
+    finally:
+        logger.info("Shutting down transcription...")
+        try:
+            await asterisk_bridge.disconnect()
+        finally:
+            try:
+                await mqtt_client.disconnect()
+            finally:
+                await rtp_server.stop()
+        logger.info("Transcription shutdown complete")
 
-    # Wait for shutdown signal
-    await shutdown_event.wait()
+async def main():
+    # Keep the control plane alive independently of optional transcription.
+    server = uvicorn.Server(uvicorn.Config(
+        api_app, host=os.getenv("HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1", port=int(os.getenv("HTTP_PORT", "8000")),
+        log_level=os.getenv("LOG_LEVEL", "info").lower()))
+    transcription = None
+    enabled = os.getenv("SATELLITE_CALL_TRANSCRIPTION_ENABLED")
+    if (enabled is None or enabled.lower() == "true") and os.getenv("DEEPGRAM_API_KEY"):
+        transcription = asyncio.create_task(supervise_transcription())
+    async def stop_transcription():
+        shutdown_event.set()
+        if transcription:
+            try:
+                await asyncio.wait_for(asyncio.shield(transcription), timeout=10)
+            except asyncio.TimeoutError:
+                transcription.cancel()
+                await asyncio.gather(transcription, return_exceptions=True)
 
-    # Graceful shutdown
-    logger.info("Shutting down...")
-    # End all active Stasis sessions before disconnecting
-    await asterisk_bridge.disconnect()
-    await rtp_server.stop()
-    await mqtt_client.disconnect()
-    logger.info("Shutdown complete")
+    # Uvicorn runs shutdown hooks before restoring and re-raising SIGTERM.
+    api_app.router.add_event_handler("shutdown", stop_transcription)
+    try:
+        await server.serve()
+    finally:
+        await stop_transcription()
 
 if __name__ == "__main__":
-    # Start API server in a background thread
-    server_thread = threading.Thread(
-        target=uvicorn.run,
-        args=(api_app,),
-        kwargs={"host": "0.0.0.0", "port": int(os.getenv("HTTP_PORT", "8000")), "log_level": os.getenv("LOG_LEVEL", "info").lower()},
-        daemon=True
-    )
-    server_thread.start()
-    # Run the realtime call transcription pipeline
-    asyncio.run(realtime_call_transcription())
+    asyncio.run(main())

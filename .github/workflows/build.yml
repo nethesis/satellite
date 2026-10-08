@@ -41,10 +41,56 @@ jobs:
         run: |
           pytest
 
+  agent-storage:
+    name: Agent isolated storage (${{ matrix.kind }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        kind: [application, monitoring]
+    services:
+      postgres:
+        image: pgvector/pgvector@sha256:2fd905ba95f99a51be207d0ff0b8d5b8538cbce7e9083b3ccfa65b93bb28b938
+        env:
+          POSTGRES_USER: satellite
+          POSTGRES_DB: satellite
+          POSTGRES_PASSWORD: isolated-ci
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U satellite"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      PGVECTOR_PORT: '5432'
+      PGVECTOR_USER: satellite
+      PGVECTOR_DATABASE: satellite
+      PGVECTOR_PASSWORD: isolated-ci
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc python3-dev portaudio19-dev
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Exercise disposable database only
+        run: |
+          if [[ '${{ matrix.kind }}' == application ]]; then
+            echo '127.0.0.1 nv-phase4-db' | sudo tee -a /etc/hosts
+            export PGVECTOR_HOST=nv-phase4-db SATELLITE_APPLICATION_ACCEPTANCE=isolated
+            python tests/test_application_acceptance.py
+          else
+            echo '127.0.0.1 nv-phase3-db' | sudo tee -a /etc/hosts
+            export PGVECTOR_HOST=nv-phase3-db SATELLITE_MONITORING_ACCEPTANCE=isolated
+            python tests/test_monitoring_acceptance.py
+          fi
+
   build-image:
     name: Build Image
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, agent-storage]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
