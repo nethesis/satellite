@@ -1,35 +1,69 @@
-"""M0 standalone runner: validates pinned snapshots; no provider or ARI traffic."""
+"""Independent voice runtime with private readiness and exact signed webhook paths."""
 import argparse
+import asyncio
 import hmac
 import ipaddress
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 import uvicorn
 
 from .contract import validate_snapshot
 
 
-def create_app(token: str) -> FastAPI:
+def create_app(token: str, runtime=None) -> FastAPI:
     if not token:
         raise ValueError('runtime_token_required')
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(app):
+        if runtime:
+            await runtime.start()
+        try:
+            yield
+        finally:
+            if runtime:
+                await runtime.stop()
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False, lifespan=lifespan)
 
     @app.get('/internal/ready')
     def ready(authorization: str = Header(default='')):
-        if not hmac.compare_digest(authorization, 'Bearer ' + token):
+        if not authorization.isascii() or not hmac.compare_digest(authorization, 'Bearer ' + token):
             raise HTTPException(status_code=401, detail='unauthorized')
-        return {'status': 'ready', 'milestone': 'M0', 'contract_version': 1,
-                'voice_calls_enabled': False}
+        return {'status': 'ready', 'milestone': 'v0.1-configuration' if runtime else 'M0', 'contract_version': 1,
+                'voice_calls_enabled': bool(runtime and runtime.controller.connected),
+                'monitoring_degraded': bool(runtime and runtime.monitoring.degraded)}
+
+    @app.post('/satellite-webhooks/openai')
+    @app.post('/satellite-webhooks/grok')
+    async def webhook(request: Request):
+        provider = request.url.path.rsplit('/', 1)[1]
+        if provider not in ('openai', 'grok'):
+            raise HTTPException(status_code=404, detail='not_found')
+        if runtime is None:
+            raise HTTPException(status_code=503, detail='runtime_unavailable')
+        raw = bytearray()
+        try:
+            async with asyncio.timeout(5):
+                async for chunk in request.stream():
+                    if len(raw) + len(chunk) > 256 * 1024:
+                        raise HTTPException(status_code=413, detail='body_too_large')
+                    raw.extend(chunk)
+        except TimeoutError:
+            raise HTTPException(status_code=408, detail='body_timeout') from None
+        try:
+            return await runtime.webhook(provider, bytes(raw), request.headers)
+        except ValueError:
+            raise HTTPException(status_code=403, detail='invalid_webhook') from None
 
     return app
 
 
 def settings():
     host = os.getenv('VOICE_AGENT_HTTP_HOST', '127.0.0.1')
-    # M0 has no public webhooks. Keep this listener private until routing is added.
+    # Traefik forwards only public webhook paths; the actual listener stays private.
     if not ipaddress.ip_address(host).is_loopback:
         raise ValueError('loopback_bind_required')
     port = int(os.getenv('VOICE_AGENT_HTTP_PORT', '8001'))
@@ -47,7 +81,14 @@ def main():
         print(json.dumps({'valid': True, 'contract_version': 1}))
         return
     host, port = settings()
-    app = create_app(os.getenv('VOICE_AGENT_RUNTIME_TOKEN', ''))
+    runtime = None
+    if os.getenv('VOICE_AGENT_ENABLED') == 'true':
+        from .ari import AriController
+        from .runtime import Runtime
+        from .storage import Storage
+        runtime = Runtime(Storage(), AriController(os.environ['ASTERISK_URL'],
+            os.environ['ARI_USERNAME'], os.environ['SATELLITE_ARI_PASSWORD'], app='voice-agent'))
+    app = create_app(os.getenv('VOICE_AGENT_RUNTIME_TOKEN', ''), runtime)
     uvicorn.run(app, host=host, port=port, access_log=False)
 
 

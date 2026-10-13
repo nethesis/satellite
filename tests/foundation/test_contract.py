@@ -39,3 +39,4 @@ def test_php_python_contract_parity():
 def test_schema_copies_are_identical():
     runtime_schema = ROOT / 'satellite/voice_agent/published-v1.schema.json'
     assert runtime_schema.read_bytes() == (CONTRACT / 'published-v1.schema.json').read_bytes()
+    assert (ROOT/'satellite/voice_agent/tools-v1.json').read_bytes()==(CONTRACT/'tools-v1.json').read_bytes()

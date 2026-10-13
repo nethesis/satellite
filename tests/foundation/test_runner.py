@@ -15,7 +15,7 @@ def test_private_runner_has_no_transcription_or_configuration_api(monkeypatch):
     response = client.get('/internal/ready', headers={'Authorization': 'Bearer synthetic-token'})
     assert response.json()['voice_calls_enabled'] is False
     for path in ['/docs', '/openapi.json', '/api/get_transcription', '/configuration',
-                 '/satellite-webhooks/openai', '/satellite-webhooks/grok']:
+                 '/satellite-webhooks/unexpected']:
         assert client.get(path).status_code == 404
     with pytest.raises(ValueError):
         create_app('')

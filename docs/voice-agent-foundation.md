@@ -1,13 +1,13 @@
-# Independent voice-agent runner — M0
+# Independent voice-agent runner
 
 `voice_agent` is separate from the existing transcription modules and their
-PostgreSQL transcript store. It has no configuration writer, configuration-push
-HTTP API, provider calls, ARI session owner or tool executor in M0.
+PostgreSQL transcript store. PHP owns all configuration in MariaDB. The runner
+reads immutable published snapshots and owns provider sideband, ARI call control
+and the two allowlisted v0.1 tools. It has no configuration writer or push API.
 
 The PHP-owned v1 schema is mirrored for runtime validation. `PublishedRepository`
 loads only the enabled published MariaDB view through an injected connection,
-verifies row/JSON identity and returns a detached snapshot. Calls will pin that
-snapshot at admission in v0.1. See the sibling NethVoice repository's
+verifies row/JSON identity and returns a detached snapshot pinned at admission. See the sibling NethVoice repository's
 `docs/voice-agents-contract-v1.md` for IDs, bounds, ownership and grants.
 
 The runner can validate a synthetic fixture offline:
@@ -19,9 +19,14 @@ python -m voice_agent.runner --check-snapshot /path/to/published-v1.example.json
 For private readiness, set a separately provisioned `VOICE_AGENT_RUNTIME_TOKEN`
 and run `python -m voice_agent.runner`. It binds to `VOICE_AGENT_HTTP_HOST`
 (default `127.0.0.1`) and `VOICE_AGENT_HTTP_PORT` (default 8001). M0 permits only
-loopback addresses. `/internal/ready` requires a Bearer token; docs, OpenAPI,
-webhooks and configuration routes are absent. Readiness explicitly reports that
-voice calls are disabled. No public Traefik route is required for this runner.
+loopback addresses. `/internal/ready` requires a Bearer token; docs, OpenAPI and
+configuration routes are absent. Without `VOICE_AGENT_ENABLED=true`, calls remain
+disabled. NS8 provisions the enabled runner through `voice-agent.service`, a private
+credential file and separate read/write DB identities. Traefik forwards only the
+public `/satellite-webhooks` prefix; FastAPI accepts exactly `/openai` and `/grok`
+under it with raw-body signature and pending-call correlation checks. See
+`ns8-nethvoice/docs/voice-agents-v01.md` for configuration, lifecycle, retention and
+remaining real-call gates. No actual provider/telephony success follows from mocks.
 
 `Containerfile.agent` builds a standalone image with runtime dependencies pinned
 in `requirements-agent.lock`, running as UID/GID 65532. The normal `Containerfile`
@@ -44,8 +49,8 @@ native PortAudio dependencies. No provider key or real telephone call is needed.
 ```sh
 PYTHONPATH=. python -m pytest -o addopts='' tests/foundation -q
 PYTHONPATH=. python -m pytest -o addopts='' tests -q --ignore=tests/foundation
-docker build -f Containerfile.agent -t nethvoice-voice-agent:m0 .
-docker build -t nethvoice-satellite:m0 .
+docker build -f Containerfile.agent -t nethvoice-voice-agent:v01-configuration .
+docker build -t nethvoice-satellite:v01-configuration .
 ```
 
 The MariaDB integration case requires the disposable test database prepared by

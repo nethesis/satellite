@@ -43,7 +43,8 @@ COPY voice_agent /app/voice_agent
 # Use an unprivileged runtime identity; NS8 supplies private credentials at startup.
 RUN groupadd --gid 65532 satellite && \
     useradd --uid 65532 --gid 65532 --home-dir /var/lib/satellite --create-home \
-        --shell /usr/sbin/nologin satellite
+        --shell /usr/sbin/nologin satellite && \
+    mkdir -p /var/lib/voice-agent && chown satellite:satellite /var/lib/voice-agent
 
 # Set environment variables with default values (can be overridden at runtime)
 ENV ASTERISK_URL="http://127.0.0.1:8088" \
