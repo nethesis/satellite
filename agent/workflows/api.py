@@ -94,9 +94,11 @@ def create_workflow_router(service):
     async def publish(kind: str, agent_id: str, request: Request, actor=Depends(private)):
         async def update():
             identifier(agent_id)
-            value = await body(request); fields(value, ("expected_revision",))
+            value = await body(request); fields(value, ("expected_revision",), ("note",))
             integer(value["expected_revision"], 1, 1000000)
-            return await service.db("workflow_publish", kind, agent_id, value["expected_revision"], actor)
+            from agent.application.contracts import string
+            string(value.get("note", ""), 2048, empty=True, multiline=True)
+            return await service.db("workflow_publish", kind, agent_id, value["expected_revision"], actor, value.get("note", ""))
         return await guarded(actor, update)
 
     @router.post("/definitions/{kind}/{agent_id}/activate")
@@ -218,4 +220,6 @@ def create_workflow_router(service):
             return await service.db("data_revoke", resource_id, version, actor)
         return await guarded(actor, execute)
 
+    from .designer_api import register_designer_routes
+    register_designer_routes(router, service, private, guarded)
     return router

@@ -91,7 +91,7 @@ def validate(value, contract):
 
 
 def connector(value):
-    fields(value, ("name", "origin", "secret_ref", "auth", "private_networks", "operations"))
+    fields(value, ("name", "origin", "secret_ref", "auth", "private_networks", "operations"), ("schema_version",))
     value = copy.deepcopy(value)
     string(value["name"], 128)
     url = urlsplit(string(value["origin"], 256))
@@ -127,6 +127,8 @@ def connector(value):
         approved = tuple(ipaddress.ip_network(v) for v in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
         if not any(parsed.version == net.version and parsed.subnet_of(net) for net in approved) or parsed.prefixlen < (16 if parsed.version == 4 else 48):
             raise ApplicationError("invalid_networks")
+    if value.get("schema_version", 1) not in (1, 2):
+        raise ApplicationError("invalid_connector_schema")
     operations = value["operations"]
     if not isinstance(operations, list) or not 1 <= len(operations) <= 20:
         raise ApplicationError("invalid_operations")
@@ -182,7 +184,7 @@ def connector(value):
         identity = op["identity_field"]
         if identity is not None and (identity not in properties or identity not in op["input_schema"].get("required", [])):
             raise ApplicationError("invalid_identity")
-        if not op["read_only"] and identity is None:
+        if not op["read_only"] and identity is None and value.get("schema_version", 1) == 1:
             raise ApplicationError("invalid_identity")
         if op.get("idempotency_header") is not None and op["idempotency_header"] != "Idempotency-Key":
             raise ApplicationError("invalid_idempotency_header")

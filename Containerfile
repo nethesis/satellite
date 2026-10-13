@@ -12,14 +12,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy requirements file
 COPY requirements.txt /tmp/requirements.txt
 
+# Install dependencies before copying source, so source edits reuse this layer.
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
+
 # Copy application files
 COPY *.py /tmp/
 COPY agent/ /tmp/agent/
 COPY README.md /tmp/
-
-# Install dependencies
-RUN python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Final stage
 FROM docker.io/library/python:3.14.4-slim

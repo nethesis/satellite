@@ -62,11 +62,24 @@ def normalized_phone(value, country_code="39"):
 
 def settings(value):
     fields(value, ("name", "format", "mapping", "country_code", "decimal_separator", "header_row"),
-           ("delimiter", "sheet", "text_pattern", "secret_ref", "spreadsheet_id", "range", "refresh_seconds", "published_url"))
+           ("delimiter", "sheet", "text_pattern", "secret_ref", "spreadsheet_id", "range", "refresh_seconds", "published_url", "kind", "columns"))
     string(value["name"], 128)
+    kind = value.get("kind", "payment")
+    if kind not in ("payment", "table", "documents"):
+        raise ApplicationError("invalid_source_kind")
+    if kind == "documents":
+        if value["format"] != "documents" or value["mapping"] != {}:
+            raise ApplicationError("invalid_documents")
+        if not re.fullmatch(r"[0-9]{1,4}", value["country_code"]) or value["decimal_separator"] not in (".", ","):
+            raise ApplicationError("invalid_locale")
+        integer(value["header_row"], 1, 100)
+        return value
+    if kind == "table":
+        from .sources import columns
+        columns(value.get("columns"))
     if value["format"] not in ("csv", "xlsx", "text", "google_sheets", "google_csv"):
         raise ApplicationError("unsupported_data_format")
-    if not isinstance(value["mapping"], dict) or not REQUIRED <= value["mapping"].keys() or not value["mapping"].keys() <= CANONICAL_FIELDS:
+    if not isinstance(value["mapping"], dict) or (kind == "payment" and (not REQUIRED <= value["mapping"].keys() or not value["mapping"].keys() <= CANONICAL_FIELDS)):
         raise ApplicationError("invalid_column_mapping")
     for column in value["mapping"].values():
         string(column, 128)
@@ -203,6 +216,9 @@ def table_values(raw, cfg):
 
 
 def normalize_table(values, cfg):
+    if cfg.get("kind") == "table":
+        from .sources import normalize
+        return normalize(values, cfg)
     header_index = 0 if cfg["format"] == "text" and cfg.get("text_pattern") else cfg["header_row"] - 1
     if len(values) <= header_index:
         raise ApplicationError("missing_header")
@@ -262,12 +278,15 @@ def normalize_table(values, cfg):
 
 
 def ingest(raw, cfg):
+    if cfg.get("kind") == "documents":
+        from .sources import documents
+        return documents(raw, cfg)
     return normalize_table(table_values(raw, cfg), cfg)
 
 
-def _parse_worker(connection, raw, cfg):
+def _parse_worker(connection, raw, cfg, inspect=False):
     try:
-        connection.send((True, ingest(raw, cfg)))
+        connection.send((True, inspect_values(table_values(raw, cfg), cfg) if inspect else ingest(raw, cfg)))
     except ApplicationError as exc:
         connection.send((False, exc.code))
     except Exception:
@@ -276,13 +295,13 @@ def _parse_worker(connection, raw, cfg):
         connection.close()
 
 
-async def bounded_ingest(raw, cfg):
+async def bounded_ingest(raw, cfg, *, inspect=False):
     """A timed-out parser is terminated, rather than left running in a thread."""
     import asyncio
     import multiprocessing
     mp = multiprocessing.get_context("spawn")
     receiver, sender = mp.Pipe(duplex=False)
-    worker = mp.Process(target=_parse_worker, args=(sender, raw, cfg), daemon=True)
+    worker = mp.Process(target=_parse_worker, args=(sender, raw, cfg, inspect), daemon=True)
     worker.start(); sender.close()
     try:
         success, value = await asyncio.wait_for(asyncio.to_thread(receiver.recv), 15)
@@ -294,6 +313,29 @@ async def bounded_ingest(raw, cfg):
             worker.terminate()
         await asyncio.to_thread(worker.join, 2)
         receiver.close()
+
+
+def inspect_values(values, cfg):
+    """Infer only column names and conservative types; never reveal cell values."""
+    index = cfg['header_row'] - 1
+    if len(values) <= index:
+        raise ApplicationError('missing_header')
+    header = [str(x or '').strip() for x in values[index]]
+    if not header or len(header) > 128 or any(not h or len(h) > 128 for h in header) or len(set(header)) != len(header):
+        raise ApplicationError('missing_or_duplicate_columns')
+    result, names = [], set()
+    for position, label in enumerate(header):
+        name = re.sub(r'[^a-z0-9_]', '_', label.casefold()).strip('_')[:40]
+        if not name or not name[0].isalpha(): name = 'column_' + str(position + 1)
+        while name in names: name = name[:40] + '_' + str(position + 1)
+        names.add(name)
+        samples = [r[position] for r in values[index + 1:index + 101] if len(r) > position and r[position] is not None and r[position] != '']
+        # IDs and codes retain strings, including leading zeroes.
+        numeric = samples and all(type(v) in (int, float) for v in samples)
+        kind = 'integer' if numeric and all(type(v) is int for v in samples) else 'number' if numeric else 'string'
+        if any(word in name for word in ('id', 'code', 'phone', 'codice', 'telefono')): kind = 'string'
+        result.append({'name': name, 'source': label, 'type': kind, 'required': False, 'sensitive': False})
+    return {'headers': header, 'columns': result, 'row_count': max(0, len(values) - index - 1)}
 
 
 def safe_row(row):

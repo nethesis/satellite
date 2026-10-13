@@ -8,6 +8,7 @@ from psycopg.types.json import Jsonb
 from agent.application.contracts import ApplicationError, canonical, digest
 from agent.application.repository import ApplicationRepository
 from .contracts import definition, execution_hash
+from .designer_repository import DesignerRepositoryMixin, DDL as DESIGNER_DDL
 
 DDL = """
 CREATE SCHEMA IF NOT EXISTS agent_workflows;
@@ -59,18 +60,19 @@ CREATE TABLE IF NOT EXISTS agent_workflows.ingestion_jobs(
 """
 
 
-class WorkflowRepository(ApplicationRepository):
+class WorkflowRepository(DesignerRepositoryMixin, ApplicationRepository):
     def initialize_workflows(self, epoch, active_jobs=(), active_runs=None):
         with self.connect() as db:
             db.execute("SELECT pg_advisory_xact_lock(783510)")
-            for sql in DDL.split(";"):
+            for sql in (DDL + DESIGNER_DDL).split(";"):
                 if sql.strip():
                     db.execute(sql)
-            if db.execute("SELECT max(version) AS v FROM agent_workflows.migrations").fetchone()["v"] != 2:
+            if db.execute("SELECT max(version) AS v FROM agent_workflows.migrations").fetchone()["v"] != 3:
                 raise ApplicationError("workflow_schema_newer", 503)
             db.execute("UPDATE agent_workflows.executions SET status='interrupted',ended=%s,error_code='runtime_restart' "
                        "WHERE status IN ('accepted','running') AND (epoch<>%s OR (%s AND NOT(run_id=ANY(%s::varchar[]))))",
                        (time.time(), epoch, active_runs is not None, active_runs or []))
+            db.execute("UPDATE agent_workflows.tool_calls SET state='interrupted',error_code='runtime_restart' WHERE state='running' AND run_id IN (SELECT run_id FROM agent_workflows.executions WHERE status='interrupted')")
             db.execute("UPDATE agent_workflows.steps SET status='interrupted',error_code='runtime_restart' WHERE status='running' "
                        "AND run_id IN (SELECT run_id FROM agent_workflows.executions WHERE status='interrupted')")
             db.execute("UPDATE agent_application.effects SET state='unknown',error_code='runtime_restart',updated=%s "
@@ -132,6 +134,18 @@ class WorkflowRepository(ApplicationRepository):
         from agent.tools.registry import MANIFESTS
         from agent.application.service import connector_tool_id
         builtin = {tool.id for tool in MANIFESTS}
+        from .tool_contracts import tool_key
+        bound_tools = {}
+        for binding in graph.get("tool_bindings", []):
+            value = self._tool_version(db, binding["tool_id"], binding["version"])
+            self.validate_tool_reference(db, value)
+            if value["kind"] == "subflow":
+                child = self._subflow_version(db, value["config"]["resource"]["resource_id"], value["config"]["resource"]["version"])
+                if not set(child["tool_grants"]) <= set(graph["tool_grants"]) or not set(graph["entrypoints"]) <= set(child["entrypoints"]):
+                    raise ApplicationError("subflow_scope_mismatch", 409)
+            if value["kind"] == "telephony" and value["config"]["tool_id"] == "telephony.handoff" and graph["entrypoints"] != ["voice"]:
+                raise ApplicationError("entrypoint_capability_mismatch", 409)
+            bound_tools[tool_key(binding)] = (binding, value)
         if graph.get('text_provider'):
             secret = db.execute('SELECT revoked FROM agent_application.secrets WHERE secret_id=%s', (graph['text_provider']['secret_ref'],)).fetchone()
             if not secret or secret['revoked']:
@@ -145,13 +159,18 @@ class WorkflowRepository(ApplicationRepository):
                     self.resolve_reference(db, {"connector_id": parts[1], "operation_id": parts[2], "version": int(parts[3][1:])})
                 except (ValueError, IndexError):
                     raise ApplicationError("unknown_tool", 409) from None
-            elif grant not in builtin:
+            elif grant not in builtin and grant not in bound_tools:
                 raise ApplicationError("unknown_tool", 409)
         if depth > 4 or graph["agent_id"] in stack:
             raise ApplicationError("recursive_subflow", 422)
         inputs = {}; outputs = {}
         for node in graph["nodes"]:
             cfg = node["config"]
+            if node["type"] == "tool.invoke":
+                bound, value = bound_tools[tool_key(cfg["tool"])]
+                if not bound["workflow"]:
+                    raise ApplicationError("operation_ungranted", 409)
+                inputs[node["id"]] = value["input_schema"]; outputs[node["id"]] = value["output_schema"]
             if node["type"] == "connector.invoke":
                 if connector_tool_id(cfg['operation']) not in graph['tool_grants']:
                     raise ApplicationError('operation_ungranted', 409)
@@ -161,6 +180,10 @@ class WorkflowRepository(ApplicationRepository):
                 if 'api' in graph['entrypoints'] and not graph.get('text_provider'):
                     raise ApplicationError('text_provider_required', 409)
                 for tool in cfg.get('tools', []):
+                    if tool in bound_tools:
+                        if not bound_tools[tool][0]["conversation"]:
+                            raise ApplicationError("operation_ungranted", 409)
+                        continue
                     if tool in builtin:
                         if not next(manifest for manifest in MANIFESTS if manifest.id == tool).read_only:
                             raise ApplicationError('effect_tool_requires_action_node', 409)
@@ -193,7 +216,7 @@ class WorkflowRepository(ApplicationRepository):
         with self.connect() as db:
             self.validate_references(db, graph)
 
-    def workflow_publish(self, kind, agent_id, expected, actor):
+    def workflow_publish(self, kind, agent_id, expected, actor, note=""):
         with self.connect() as db:
             db.execute("SELECT pg_advisory_xact_lock(783510)")
             row = db.execute("SELECT * FROM agent_workflows.definitions WHERE kind=%s AND agent_id=%s FOR UPDATE", (kind, agent_id)).fetchone()
@@ -206,6 +229,7 @@ class WorkflowRepository(ApplicationRepository):
             if db.execute("SELECT count(*) AS n FROM agent_workflows.versions").fetchone()["n"] >= 2000:
                 raise ApplicationError("version_capacity", 429)
             version = row["published_version"] + 1
+            db.execute("INSERT INTO agent_workflows.publication_notes VALUES(%s,%s,%s,%s)", (kind, agent_id, version, note))
             db.execute("INSERT INTO agent_workflows.versions VALUES(%s,%s,%s,%s,%s,false,%s)",
                        (kind, agent_id, version, Jsonb(graph), execution_hash(graph), time.time()))
             db.execute("UPDATE agent_workflows.definitions SET revision=revision+1,published_version=%s,active_version=%s WHERE kind=%s AND agent_id=%s", (version, version, kind, agent_id))
@@ -289,6 +313,7 @@ class WorkflowRepository(ApplicationRepository):
             "AND v.version < (SELECT published_version-2 FROM agent_workflows.data WHERE resource_id=v.resource_id) "
             "AND NOT EXISTS(SELECT 1 FROM agent_workflows.execution_data_refs p JOIN agent_workflows.executions e USING(run_id) "
             "WHERE p.resource_id=v.resource_id AND p.version=v.version AND e.status IN ('accepted','running')) "
+            "AND NOT EXISTS(SELECT 1 FROM agent_workflows.tool_versions t WHERE NOT t.revoked AND t.definition->'config'->'resource'->>'resource_id'=v.resource_id AND t.definition->'config'->'resource'->>'version'=v.version::text) "
             "AND NOT EXISTS(SELECT 1 FROM (SELECT definition AS graph FROM agent_workflows.versions WHERE NOT revoked "
             "UNION ALL SELECT draft FROM agent_workflows.definitions) g, jsonb_array_elements(g.graph->'nodes') n "
             "WHERE n->>'type' IN ('data.lookup','identity.resolve','identity.verify') "
@@ -417,6 +442,7 @@ class WorkflowRepository(ApplicationRepository):
         return {"cancel_requested": True}
 
     def workflow_purge(self):
+        self.designer_purge()
         with self.connect() as db:
             db.execute("SELECT pg_advisory_xact_lock(783510)")
             db.execute("DELETE FROM agent_workflows.verification_attempts WHERE started<%s", (time.time()-600,))

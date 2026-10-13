@@ -34,6 +34,8 @@ class Workflows:
         self._refresh = set()
         self._ingestion = set()
         self._ingestion_ids = set()
+        from .designer import Designer
+        self.designer = Designer(self)
 
     async def db(self, method, *args):
         async with self.application._db_slots:
@@ -95,6 +97,8 @@ class Workflows:
     async def inventory(self):
         self.require_available()
         inventory = await self.db("workflow_inventory")
+        inventory.update(await self.db("tool_inventory"))
+        inventory["dependencies"] = await self.db("designer_dependencies")
         connections = await self.application.db('inventory')
         operations = []
         for version in connections['versions']:
@@ -141,11 +145,18 @@ class Workflows:
                     "revision": row["revision"], "version": row["active_version"], "entrypoints": [],
                     "tools": [], "provider": None, "draft": draft, "error_code": "invalid_draft"})
 
+        for row in connections['resources']:
+            if row['kind'] == 'preset' and row['resource_id'] == 'support-request':
+                agents.append({'agent_id': row['resource_id'], 'kind': 'preset', 'name': row['draft']['name'],
+                               'status': 'published' if row['published_version'] else 'draft',
+                               'version': row['published_version'], 'revision': row['revision'], 'entrypoints': ['api'], 'tools': []})
+
         routing = [{key: target[key] for key in ("id", "type", "name", "description", "synonyms", "internal_allowed", "external_allowed") if key in target} | {"ready": True} for target in payload.get("directory", [])]
         routing.extend({"id": "agent:" + agent["agent_id"], "name": agent["name"], "type": "agent", "ready": agent["status"] == "ready"} for agent in agents if agent["kind"] != "subflow")
         return inventory | {"agents": agents, "connector_operations":operations, "routing_objects": routing, "blocks": BLOCKS, "bindings": [{"id": key, "name": "#" + key + " " + item["provider"]} for key, item in bindings.items()], "health": {"available": self.available}}
 
     def tool_preview(self, graph):
+        from .tool_contracts import tool_key
         used = []
         for node in graph.get("nodes", []):
             if node["type"] == "connector.invoke":
@@ -158,7 +169,10 @@ class Workflows:
                 used.append({"id": node["type"], "node_id": node["id"], "mode": "step", "available": True})
             configured = node.get('config', {}).get('tools', [])
             for tool in configured if isinstance(configured, list) else []:
-                used.append({"id": tool, "node_id": node["id"], "mode": "conversation", "available": tool in graph.get("tool_grants", [])})
+                used.append({"id": tool, "node_id": node["id"], "mode": "conversation", "available": tool in graph.get("tool_grants", []) or any(tool_key(b) == tool and b["conversation"] for b in graph.get("tool_bindings", []))})
+        from .tool_contracts import tool_key
+        for binding in graph.get("tool_bindings", []):
+            used.append({"id": tool_key(binding), "mode": "conversation" if binding["conversation"] else "step", "available": True})
         return used
 
     async def check(self, graph, context):
@@ -201,6 +215,9 @@ class Workflows:
             raise ApplicationError("conversation_fixture_required")
         if not context.get("conversation"):
             raise ApplicationError("conversation_capability_unavailable")
+        if graph and (graph.get("goal") or graph.get("instructions")):
+            node = copy.deepcopy(node)
+            node["config"]["prompt"] = "\n".join(x for x in (graph.get("goal"), graph.get("instructions"), node["config"]["prompt"]) if x)
         return await context["conversation"](node, inputs, graph)
 
     async def confirm(self, context, prompt):
@@ -215,6 +232,19 @@ class Workflows:
         fixed_refs = set()
         seen = set()
         async def collect(current):
+            for binding in current.get("tool_bindings", []):
+                value = await self.db("tool_version", binding["tool_id"], binding["version"])
+                if value["kind"] in ("query", "documents"):
+                    ref = value["config"]["resource"]
+                    if ref["version"] == "latest": resources.add(ref["resource_id"])
+                    else: fixed_refs.add((ref["resource_id"], ref["version"]))
+                elif value["kind"] == "subflow":
+                    ref = value["config"]["resource"]
+                    key = (ref["resource_id"], ref["version"])
+                    if key in seen: continue
+                    seen.add(key)
+                    child = await self.db("subflow_version", *key)
+                    await collect(child)
             for node in current["nodes"]:
                 if node["type"] in ("data.lookup", "identity.resolve", "identity.verify"):
                     ref = node["config"]["resource"]
@@ -368,6 +398,11 @@ class Workflows:
 
     async def conversation_tools(self, graph, node, context):
         selected = set(node["config"].get("tools", []))
+        registry_tools = await self.designer.resolve(graph, node, context)
+        from .tool_contracts import tool_key
+        selected |= {tool_key(row["binding"]) for row in registry_tools}
+        context["registry_tools"] = registry_tools
+        context["registry_mode"] = "conversation"
         from agent.tools.registry import MANIFESTS
         refs = []
         for tool in selected:
@@ -379,13 +414,26 @@ class Workflows:
         resolved = [item for item in resolved if item["operation"]["read_only"]]
         context.update({"_workflow": True, "workflow_graph": graph, "workflow_node": node, "connector_tools": resolved})
         tools = self.runtime.tools.provider_tools(context)
-        known = {manifest.wire_name: manifest.id for manifest in MANIFESTS} | {wire_name(item["reference"]): connector_tool_id(item["reference"]) for item in resolved}
+        known = {manifest.wire_name: manifest.id for manifest in (*MANIFESTS, *self.designer.manifests(context))} | {wire_name(item["reference"]): connector_tool_id(item["reference"]) for item in resolved}
         effect_tools = {manifest.wire_name for manifest in MANIFESTS if not manifest.read_only}
         return [tool for tool in tools if known.get(tool["name"]) in selected and tool['name'] not in effect_tools]
 
     async def authorize_connector(self, item, args, context):
         graph = context["workflow_graph"]; node = context["workflow_node"]; ref = item["reference"]; op = item["operation"]
-        if connector_tool_id(ref) not in graph["tool_grants"]:
+        registry = context.get("_registry_binding")
+        reusable = context.get("_registry_subflow_binding")
+        reusable_direct = bool(reusable and graph.get("schema_version") == 2 and reusable["definition"]["execution_policy"] == "direct" and connector_tool_id(ref) in graph["tool_grants"])
+        if reusable_direct:
+            from .sources import matches
+            scope = reusable["binding"]["scope"]
+            identity_field = scope.get("identity_field")
+            identity = context.get("identity", {})
+            if identity_field and (not identity.get("verified") or identity.get(identity_field) is None or args.get(identity_field) != identity[identity_field]):
+                raise ApplicationError("identity_denied", 403)
+            if any(not matches(args.get(k), "eq", v) for k, v in scope.get("filters", {}).items()):
+                raise ApplicationError("caller_scope_mismatch", 403)
+        direct = bool(registry and graph.get("schema_version") == 2 and registry["definition"]["kind"] == "api" and registry["definition"]["config"]["operation"] == ref and registry["definition"]["execution_policy"] == "direct") or reusable_direct
+        if not registry and connector_tool_id(ref) not in graph["tool_grants"]:
             raise ApplicationError("operation_denied", 403)
         await self.check(graph, context)
         if not await self.application.db("enabled"):
@@ -396,7 +444,7 @@ class Workflows:
             expected = context.get("caller", {}).get("phone") if identity_field == "phone" else context.get("identity", {}).get("customer_id")
             if not expected or args.get(identity_field) != expected:
                 raise ApplicationError("identity_denied", 403)
-        elif not op["public_voice"]:
+        elif not op["public_voice"] and not registry and not reusable_direct:
             raise ApplicationError("identity_policy_missing", 403)
         if context.get("execution_kind") == "api":
             client = await self.application.db("client", context["principal"])
@@ -411,10 +459,20 @@ class Workflows:
                 field = node["config"].get("priority_field", "priority")
                 priority = args.get(field)
                 ticket = context.get("tickets", {}).get(str(args.get("ticket_id")))
-                if not ticket or type(priority) is not int or priority != 4 or priority not in node["config"].get("allowed_priorities", []) or priority <= ticket.get("priority", priority):
+                if not ticket or type(priority) is not int or priority != 4 or priority not in ([registry["binding"]["scope"].get("filters", {}).get(field)] if direct and registry else node["config"].get("allowed_priorities", [])) or priority <= ticket.get("priority", priority):
                     raise ApplicationError("urgency_rule_denied", 403)
-            if context.get("confirmations", {}).get(digest({"operation": ref, "arguments": args}), 0) < time.monotonic():
+            if (not direct or context.get("execution_kind") == "api") and context.get("confirmations", {}).get(digest({"operation": ref, "arguments": args}), 0) < time.monotonic():
                 raise ApplicationError("write_confirmation_required", 403)
+
+    async def inspect_data(self, cfg, raw):
+        from .data import inspect_values
+        async with self._parse_slots:
+            if cfg['format'] == 'google_csv': raw = await published_csv(cfg)
+            if cfg['format'] == 'google_sheets':
+                credential = await self.application.db('secret', cfg['secret_ref'], self.application.key)
+                values = await google_values(cfg, credential, self.application.transport)
+                return await asyncio.to_thread(inspect_values, values, cfg)
+            return await bounded_ingest(raw, cfg, inspect=True)
 
     async def preview_data(self, cfg, raw):
         async with self._parse_slots:
@@ -426,7 +484,8 @@ class Workflows:
                 rows, errors = await asyncio.to_thread(normalize_table, values, cfg)
             else:
                 rows, errors = await bounded_ingest(raw, cfg)
-        return {"rows": [safe_row(row) for row in rows[:20]], "row_count": len(rows), "errors": errors}
+        from .sources import preview_row
+        return {"rows": [preview_row(row, cfg) for row in rows[:20]], "row_count": len(rows), "errors": errors}
 
     async def publish_data(self, resource_id, expected, raw, actor, job_id=None):
         resource = await self.db("data_settings", resource_id)
@@ -435,7 +494,7 @@ class Workflows:
         if errors:
             raise ApplicationError("invalid_data_rows")
         return await self.db("data_publish", resource_id, expected, rows, __import__("base64").b64encode(raw).decode(),
-            {"country_code": resource["settings"]["country_code"], "row_count": len(rows), "format": resource["settings"]["format"]}, self.application.key, actor, job_id)
+            {"country_code": resource["settings"]["country_code"], "row_count": len(rows), "format": resource["settings"]["format"], "kind": resource["settings"].get("kind", "payment"), "columns": resource["settings"].get("columns", []), "documents": list({r["document_id"]: {"document_id": r["document_id"], "name": r["document"], "state": r["state"]} for r in rows if "document_id" in r}.values())}, self.application.key, actor, job_id)
 
     async def enqueue_data(self, resource_id, expected, raw, actor):
         job_id = uuid.uuid4().hex
@@ -473,7 +532,7 @@ class Workflows:
             if errors:
                 raise ApplicationError("invalid_data_rows")
             return await self.db("data_publish", resource_id, expected, rows, __import__('base64').b64encode(raw).decode() if raw is not None else None,
-                {"country_code": cfg["country_code"], "row_count": len(rows), "format": cfg["format"]}, self.application.key, actor, job_id)
+                {"country_code": cfg["country_code"], "row_count": len(rows), "format": cfg["format"], "kind": cfg.get("kind", "payment"), "columns": cfg.get("columns", [])}, self.application.key, actor, job_id)
         except BaseException as exc:
             await asyncio.shield(self.db("data_refresh_error", resource_id, exc.code if isinstance(exc, ApplicationError) else "sheet_refresh_failed"))
             raise

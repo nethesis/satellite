@@ -82,7 +82,7 @@ class WorkflowEngine:
             try:
                 node_inputs = bind(node["inputs"], outputs)
                 remaining = deadline - time.monotonic()
-                if node["type"] == "subflow":
+                if node["type"] in ("subflow", "tool.invoke"):
                     # The nested engine applies the child graph deadline. Do not
                     # wrap a whole reusable graph in a single-operation timeout.
                     step_timeout = remaining
@@ -138,6 +138,10 @@ class WorkflowEngine:
                 raise ApplicationError('invalid_fixture_outcome')
             validate(fixture.get('output', {}), output_contract(node))
             return fixture["outcome"], fixture.get("output", {})
+        if kind == "tool.invoke":
+            if context.get("test_mode"):
+                raise ApplicationError("tool_fixture_required")
+            return "success", await self.service.designer.node(graph, node, args, context)
         if kind == "start.call":
             return "success", {key: str(context.get("caller", {}).get(key) or "") for key in ("phone", "name", "did", "origin")}
         if kind == "start.api":

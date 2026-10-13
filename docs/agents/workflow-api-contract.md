@@ -181,3 +181,143 @@ Verification attempts are persisted per call, matched resident and resource.
 The limits are five attempts per call/resident in ten minutes and 100 per resource
 in one minute. Withheld caller IDs have separate call budgets. Rotating caller ID,
 restarting the service and running mock tests cannot reset a resident’s budget.
+
+## Standalone Agents designer (definition schema 2)
+
+The administrator document is `/freepbx/satellite/agents/`. The Wizard menu
+opens it in a new tab. It uses Vue 3, Tailwind CSS 4, Nethesis Vue components
+and Vue Flow. Its REST gateway remains `/freepbx/rest/agents`; browser requests
+reuse verified Wizard credentials. `GET /access` supplies the session CSRF
+value. Mutations require `X-Agents-CSRF`. The webhook document remains
+`/freepbx/satellite/index.php`.
+
+Schema 1 publications retain their existing behavior. Editing a legacy draft
+in the new UI adds schema 2 fields without removing legacy nodes or grants.
+Schema 2 adds `goal`, `instructions`, `capture_tool_content` (default false)
+and `tool_bindings` (a list, default empty). Each binding has:
+
+```json
+{"tool_id":"tickets","version":1,"conversation":true,"workflow":true,
+ "scope":{"filters":{"priority":4}},"instructions":"Use for urgent support requests",
+ "origins":["internal","external"]}
+```
+
+Published tool references are immutable. The logical ID is `tool.tickets.v1`;
+provider wire names are derived from the full reference without slug collisions.
+A conversation's `tool_mode` is `inherit` or `selected`. Inherited phases use
+all conversation-enabled bindings; selected phases use only their `tools` list.
+Phase selection cannot add authority absent from the agent binding. Disabling
+conversation use does not disable explicit workflow use. `tool.invoke` uses
+`config.tool: {tool_id, version}` and literal/node-output inputs. Removing a
+binding preserves explicit references so validation can identify broken steps.
+Execution hashes include executable tool settings and exclude canvas layout.
+
+A tool definition contains `name`, `description`, `kind`, `input_schema`,
+`output_schema`, `config`, `execution_policy` and `timeout_seconds` (1–30).
+Kinds are `api`, `query`, `documents`, `telephony` and `subflow`. API tools pin
+an immutable connector operation. Native tools use exactly the exported native
+schemas and retain PBX permissions and caller ownership checks. Subflow tools
+pin an immutable child graph and cannot recursively add hidden registry tool
+bindings. Child grants and permissions cannot exceed the parent's; step budgets,
+subflow paths and deadlines are shared. A complete subflow has its graph
+execution deadline rather than a single-operation ten-second deadline.
+
+### Direct write policy
+
+A schema 2 registry tool with `execution_policy: "direct"` executes enabled
+writes immediately. It does not ask the caller for confirmation. Arguments,
+fixed scope filters, verified identity, connector grants, immutable versions,
+application enablement and durable effect state are still checked. A direct
+schema 2 subflow applies these bounds to child business operations. Schema 1
+child graphs and legacy action/confirmation nodes retain their existing policy.
+The urgency operation also retains its trusted ticket/priority rule. For a
+direct API tool, bind its fixed `priority: 4` scope when enabling that operation.
+
+Machine clients still require allowed agents, operations, customer IDs and
+`operations:write`. Exact `approved_actions` arguments are still required for
+machine writes. An uncertain or previously recorded invocation is not replayed.
+
+### Designer private routes
+
+These paths extend `/api/agent/v1/application/workflows`. They require the
+private bearer token and a safe `X-Agents-Actor`. The Wizard gateway exposes
+only the corresponding concrete routes and preserves JSON objects and lists.
+
+| Method | Path | Input/result |
+| --- | --- | --- |
+| GET | `/tools` | Draft tools and immutable versions |
+| PUT | `/tools/{id}` | `{definition, expected_revision}` |
+| POST | `/tools/{id}/publish` | `{expected_revision}` |
+| GET / DELETE | `/tools/{id}/versions/{version}` | Read / revoke version |
+| POST | `/tools/test` | `{definition, arguments, fixture?, rows?, columns?, identity?, scope?}`; synthetic results only |
+| GET | `/dependencies` | Draft/publication/source/operation references |
+| POST | `/data/inspect` | `{settings, content?}`; headers, conservative types and row count; no cell values |
+| GET | `/data/{id}/versions/{version}/preview` | Masked rows and pinned source metadata |
+| POST | `/documents/{id}/publish` | `{expected_revision, files, remove?}`; asynchronous immutable ingestion job |
+| POST | `/simulations` | `{definition, fixtures, input, caller, tables?, destinations?, subflows?, messages?}` |
+| GET | `/simulations/{id}` | Saved mock trace and unexpired encrypted fixture content |
+| POST | `/activity` | `{since?, until?, agent_id?, kind?, status?, before?, limit?}`; unified rows, counts and cursor |
+| GET | `/runs/{id}/tool-calls` | Invocation metadata; no arguments/results |
+| GET | `/runs/{id}/tool-calls/{invocation}/content` | Audited opt-in encrypted content, or content unavailable |
+| POST | `/connections/test` | `{operation, arguments}`; a real read operation only |
+| PUT | `/credentials/{id}` | `{value}`; encrypted credential replacement |
+
+Draft and publication calls use optimistic revisions. Publication accepts an
+optional bounded `note`. Notes are stored separately from immutable graphs.
+Publication/activation continue to reconcile native voice destinations, snapshot
+synchronization and PBX reload; draft saves do not alter routing.
+
+### Generic tables and local documents
+
+Source settings add `kind: "table"` and typed `columns`, each with `name`,
+`source`, `type`, `required` and `sensitive`. Types are string, integer, number,
+boolean, date and month. Text identifiers preserve leading zeroes. Numeric XLSX
+cells cannot silently become text identifiers. Existing payment settings retain
+their resident verification and private-field rules. CSV, XLSX, private Google
+Sheets and published Google CSV use the existing upload/network bounds. XLSX
+formulas and macros are not evaluated.
+
+Query tool config has a pinned or per-run `latest` resource, returned `fields`,
+`filters`, `limit` (1–100), optional `sort`, `aggregate` and freshness limit.
+Filters use typed literals, tool inputs or verified identity. Fixed binding
+scope is applied before projection/aggregation. Aggregates are count, sum,
+minimum, maximum and average. SQL and expressions are not accepted. Sensitive
+columns are excluded from previews and returned rows/aggregates. Published
+column metadata controls pinned versions even while a source draft is edited.
+
+Document sources use `kind/format: "documents"`. Each file has `document_id`,
+`name`, `format: "pdf" | "txt"` and base64 `content`. A collection has at most
+50 documents, a combined 10 MiB upload and 10 MiB extracted text. PDFs are bounded
+to 500 pages; encrypted PDFs are rejected. Scanned files without text stay visible
+as `needs_verification` and supply no passages. Parsing runs in the killable,
+15-second ingestion process. Originals and chunks are encrypted. Search uses
+local BM25 ranking, bounded Unicode queries and deterministic document/page
+citations. No embedding provider or OCR is called. Replacement/removal creates
+a new immutable collection version; refresh failure keeps the last good version.
+
+### Offline tests and Activity
+
+The Test tab is a saved offline simulation. Conversation responses and tool
+results are scripted fixtures. A conversation fixture may also include
+`tool_calls: [{tool: {tool_id, version}, arguments, result, identity?}]`; phase
+permissions and published schemas are checked. No provider request, phone call,
+connector request or effect dispatcher is invoked. Only calls on the visited
+branch appear in the result. Synthetic tables, destinations and subflows are
+bounded. A connection probe and machine `/test-runs` remain real operations and
+are separate from the Test tab.
+
+Activity combines durable workflow runs, saved mocks, native call history and
+legacy API runs without duplicating a workflow's monitoring record. History
+unavailability is explicit. Mock records expire after 30 days; encrypted mock
+messages/results and optional successful tool argument/result capture expire
+after 7 days. Ordinary invocation metadata has no arguments, results, secrets or
+private summaries. Restart marks unfinished invocations interrupted. Database
+backup covers the added `agent_workflows` tables; clone still discards copied
+control-state volumes.
+
+The FreePBX-only native gateway adds `GET /native/inventory`,
+`PUT /native/profiles/{internal|external}` with `{profile, expected_revision,
+directory?}`, and `POST /native/bindings` / `PUT /native/bindings/{id}` with
+`{binding}`. It keeps trunk ownership/provisioning, encrypted native secrets,
+calendar validation, fallback cycle checks, directory visibility and transactional
+configuration revision changes in FreePBX.

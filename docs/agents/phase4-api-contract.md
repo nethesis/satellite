@@ -224,3 +224,12 @@ Rolling back to the Phase 3 schema-1 reader makes monitoring unavailable because
 of its deliberate newer-schema guard; do not drop data or regenerate encryption
 keys to bypass it. Keep the database and matching keys, disable API access, and
 roll forward to a compatible runtime. No automatic write replay is supported.
+
+## Designer connector schema 2
+
+The standalone designer accepts connector `schema_version: 2`. A private write
+operation may omit `identity_field` when an explicit schema 2 tool binding supplies
+its authority and scope. Public voice write operations remain forbidden. Version 1
+connector definitions and legacy workflow actions retain their confirmation policy.
+Registry writes use durable effects and preserve scoped machine clients and exact
+argument approvals. See the schema 2 section of `workflow-api-contract.md`.

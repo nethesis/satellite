@@ -350,6 +350,9 @@ class Application:
             return []
 
     def manifests(self, context):
+        designer = getattr(getattr(self.runtime, "workflows", None), "designer", None)
+        if designer is not None:
+            yield from designer.manifests(context)
         for item in get(context, "connector_tools", []):
             op, ref = item["operation"], item["reference"]
             name = wire_name(ref)
@@ -394,6 +397,11 @@ class Application:
                     raise ApplicationError("write_confirmation_mismatch", 403)
 
     async def invoke(self, tool_id, args, context):
+        if tool_id.startswith("tool."):
+            try:
+                return await self.runtime.workflows.designer.invoke(tool_id, args, context)
+            except ApplicationError as exc:
+                raise ConnectorFailure(exc.code) from None
         item = next((i for i in get(context, "connector_tools", []) if connector_tool_id(i["reference"]) == tool_id), None)
         if item is None:
             raise PermissionDenied("operation_denied")

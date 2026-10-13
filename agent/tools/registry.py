@@ -6,6 +6,7 @@ import inspect
 import json
 import time
 from collections import OrderedDict
+from contextlib import nullcontext
 from typing import Any
 
 from jsonschema import Draft202012Validator, ValidationError
@@ -118,7 +119,7 @@ class ToolRegistry:
     def provider_tools(self, context) -> list[dict]:
         result = []
         for m in (*MANIFESTS, *(self.extensions.manifests(context) if self.extensions else ())):
-            if not m.id.startswith("connector.") and not tool_enabled(context, m.id):
+            if not m.id.startswith(("connector.", "tool.")) and not tool_enabled(context, m.id):
                 continue
             if m.required_capability and not self._has_voice_context(context):
                 continue
@@ -158,7 +159,7 @@ class ToolRegistry:
                 parameters["properties"]["service_id"]["enum"] = services
             result.append({"type": "function", "name": m.wire_name,
                            "description": description,
-                           "parameters": parameters, "strict": not m.id.startswith("connector.")})
+                           "parameters": parameters, "strict": not m.id.startswith(("connector.", "tool."))})
         return result
 
     @staticmethod
@@ -229,11 +230,11 @@ class ToolRegistry:
                          tool_id=manifest.id)
         lock = self._locks.setdefault(run_id, asyncio.Lock())
         try:
-            async with lock:
+            async with (nullcontext() if get(context, "_tool_lock_owner") is lock else lock):
                 cancellation = get(context, "cancellation")
                 if cancellation is not None and callable(get(cancellation, "is_set")) and cancellation.is_set():
                     raise AgentUnavailable("run cancelled")
-                if not manifest.id.startswith("connector.") and not tool_enabled(context, manifest.id):
+                if not manifest.id.startswith(("connector.", "tool.")) and not tool_enabled(context, manifest.id):
                     raise PermissionDenied("tool disabled")
                 remaining = manifest.timeout_seconds
                 deadline = get(context, "deadline_monotonic")
@@ -241,7 +242,7 @@ class ToolRegistry:
                     remaining = min(remaining, deadline - time.monotonic())
                 if remaining <= 0:
                     raise AgentUnavailable("run deadline exceeded")
-                operation = asyncio.create_task(self._invoke(manifest.id, args, context))
+                operation = asyncio.create_task(self._invoke(manifest.id, args, (context | {"_tool_invocation_id": invocation_id, "_tool_lock_owner": lock}) if isinstance(context, dict) else context))
                 cancel_task = None
                 if cancellation is not None and callable(get(cancellation, "wait")):
                     cancel_task = asyncio.create_task(cancellation.wait())
@@ -291,7 +292,7 @@ class ToolRegistry:
             pass
 
     async def _invoke(self, tool_id: str, args: dict, context) -> dict:
-        if tool_id.startswith("connector.") and self.extensions:
+        if tool_id.startswith(("connector.", "tool.")) and self.extensions:
             return await self.extensions.invoke(tool_id, args, context)
         if tool_id == "directory.find_destinations":
             terms = args["query"].casefold().split()

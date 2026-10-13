@@ -31,7 +31,7 @@ TEXT = {"type": "string", "maxLength": 8192}
 IDS = {"type": "array", "items": {"type": "string"}, "maxItems": 100}
 CONVERSATION = obj({"prompt": TEXT, "output_schema": {"type": "object"},
                     "outcomes": IDS, "max_turns": {"type": "integer", "minimum": 1, "maximum": 5},
-                    "tools": IDS}, ["prompt", "output_schema", "outcomes", "max_turns"])
+                    "tools": IDS, "tool_mode": {"enum": ["inherit", "selected"]}}, ["prompt", "output_schema", "outcomes", "max_turns"])
 CATALOG = obj({"defaults": obj({k: {"type": "boolean"} for k in ("extension", "queue", "ivr", "agent")}),
                "overrides": {"type": "object", "additionalProperties": {"type": "boolean"}},
                "delegations": {"type": "object", "additionalProperties": IDS}})
@@ -77,6 +77,7 @@ BLOCKS = [
              config=obj({"ring_seconds": {"type": "integer", "minimum": 5, "maximum": 60},
                          "consult_seconds": {"type": "integer", "minimum": 5, "maximum": 60}}, ["ring_seconds", "consult_seconds"]), voice=True, effect=True),
     manifest("subflow", "reuse", config=obj({"resource": REF}, ["resource"])),
+    manifest("tool.invoke", "tools", config=obj({"tool": obj({"tool_id": TEXT, "version": {"type": "integer", "minimum": 1}}, ["tool_id", "version"])}, ["tool"]), effect=True),
 ]
 # Concrete field contracts drive the inspector and validate deterministic inputs.
 _BLOCK_FIELDS = {
@@ -144,7 +145,7 @@ def path_schema(contract, path):
 def definition(value, *, subflow=False, input_schemas=None, output_schemas=None):
     fields(value, ("schema_version", "agent_id", "name", "description", "entrypoints",
                    "nodes", "edges", "input_schema", "output_schema", "limits", "layout",
-                   "provider_binding_ref", "fallback", "permissions", "tool_grants"), ("text_provider", "voice_settings"))
+                   "provider_binding_ref", "fallback", "permissions", "tool_grants"), ("text_provider", "voice_settings", "tool_bindings", "capture_tool_content", "goal", "instructions"))
     value = copy.deepcopy(value)
     if value.get('voice_settings') is None:
         value.pop('voice_settings', None)
@@ -154,8 +155,26 @@ def definition(value, *, subflow=False, input_schemas=None, output_schemas=None)
         value['fallback'] = None
     input_schemas = input_schemas or {}
     output_schemas = output_schemas or {}
-    if value["schema_version"] != 1 or type(value["schema_version"]) is not int:
+    if value["schema_version"] not in (1, 2) or type(value["schema_version"]) is not int:
         raise DefinitionError("unsupported_definition_schema")
+    if value["schema_version"] == 1 and any(k in value for k in ("tool_bindings", "capture_tool_content", "goal", "instructions")):
+        raise DefinitionError("unsupported_definition_schema")
+    if value["schema_version"] == 2:
+        for key in ("goal", "instructions"):
+            if key in value: string(value[key], 8192, empty=True, multiline=True)
+        from .tool_contracts import binding, tool_key
+        bindings = value.get("tool_bindings", [])
+        if not isinstance(bindings, list) or len(bindings) > 100:
+            raise DefinitionError("invalid_tool_bindings")
+        seen_tools = set()
+        for item in bindings:
+            binding(item)
+            key = tool_key(item)
+            if key in seen_tools:
+                raise DefinitionError("duplicate_tool_binding")
+            seen_tools.add(key)
+        if type(value.get("capture_tool_content", False)) is not bool:
+            raise DefinitionError("invalid_capture_policy")
     identifier(value["agent_id"])
     if value["agent_id"] in ("internal", "external", "support-request"):
         raise DefinitionError("reserved_agent_id")
@@ -208,8 +227,16 @@ def definition(value, *, subflow=False, input_schemas=None, output_schemas=None)
                 identifier(port)
                 if port in ("error", "timeout"):
                     raise DefinitionError("reserved_outcome", node["id"])
-            if not set(node["config"].get("tools", [])) <= set(value["tool_grants"]):
+            permitted = set(value["tool_grants"])
+            if value["schema_version"] == 2:
+                from .tool_contracts import tool_key
+                permitted |= {tool_key(b) for b in value.get("tool_bindings", []) if b["conversation"]}
+            if not set(node["config"].get("tools", [])) <= permitted:
                 raise DefinitionError("ungranted_conversation_tool", node["id"])
+        if node["type"] == "tool.invoke":
+            from .tool_contracts import tool_key
+            if value["schema_version"] != 2 or tool_key(node["config"]["tool"]) not in {tool_key(b) for b in value.get("tool_bindings", []) if b["workflow"]}:
+                raise DefinitionError("ungranted_workflow_tool", node["id"])
         if not isinstance(node["inputs"], dict) or len(node["inputs"]) > 64:
             raise DefinitionError("invalid_input_bindings", node["id"])
         nodes[node["id"]] = node
