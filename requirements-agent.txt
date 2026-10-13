@@ -1,0 +1,5 @@
+# Standalone foundation dependencies; independent of transcription and PostgreSQL.
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+jsonschema>=4.23,<5
+mysql-connector-python>=9,<10

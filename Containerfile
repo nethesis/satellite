@@ -1,5 +1,5 @@
 # Build stage
-FROM python:slim AS builder
+FROM docker.io/library/python:3.12.13-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,16 +11,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements file
 COPY requirements.txt /tmp/requirements.txt
+COPY requirements-agent.lock /tmp/requirements-agent.lock
 
 # Copy application files
 COPY *.py /tmp/
 COPY README.md /tmp/
 
 # Install dependencies
-RUN pip install --no-cache-dir --no-warn-script-location --user -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --no-warn-script-location --user -r /tmp/requirements.txt -r /tmp/requirements-agent.lock
 
 # Final stage
-FROM python:slim
+FROM docker.io/library/python:3.12.13-slim
 
 # Install runtime dependencies for PyAudio
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -32,14 +33,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy installed packages from builder
-COPY --from=builder /root/.local /root/.local
+COPY --from=builder /root/.local /usr/local
 
 # Copy application files
 COPY --from=builder /tmp/*.py /app/
 COPY --from=builder /tmp/README.md /app/
+COPY voice_agent /app/voice_agent
 
-# Make sure scripts in .local are usable
-ENV PATH=/root/.local/bin:$PATH
+# Use an unprivileged runtime identity; NS8 supplies private credentials at startup.
+RUN groupadd --gid 65532 satellite && \
+    useradd --uid 65532 --gid 65532 --home-dir /var/lib/satellite --create-home \
+        --shell /usr/sbin/nologin satellite
 
 # Set environment variables with default values (can be overridden at runtime)
 ENV ASTERISK_URL="http://127.0.0.1:8088" \
@@ -63,6 +67,8 @@ ENV ASTERISK_URL="http://127.0.0.1:8088" \
 # Expose RTP port and HTTP port
 EXPOSE ${RTP_PORT}/udp
 EXPOSE ${HTTP_PORT}
+
+USER satellite
 
 # Run the application
 CMD ["python", "main.py"]
