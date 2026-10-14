@@ -31,12 +31,16 @@ def test_v3_contract_and_manifest_copies():
         assert (CONTRACT / filename).read_bytes() == (ROOT / 'satellite/voice_agent' / filename).read_bytes()
 
 
-@pytest.mark.parametrize('invalid', [None, 'boolean', 'limit', 'duplicate', 'version', 'unknown', 'queue'])
+@pytest.mark.parametrize('invalid', [None, 'boolean', 'limit', 'float_limit', 'duplicate', 'duplicate_variant', 'version', 'unknown', 'queue'])
 def test_v3_php_python_configuration_parity(invalid):
     value = snapshot()
     if invalid == 'boolean': value['tool_bindings'][0]['enabled'] = 1
     if invalid == 'limit': value['tool_bindings'][0]['config']['max_results'] = 101
+    if invalid == 'float_limit': value['tool_bindings'][0]['config']['max_results'] = 20.0
     if invalid == 'duplicate': value['tool_bindings'].append(copy.deepcopy(value['tool_bindings'][0]))
+    if invalid == 'duplicate_variant':
+        value['tool_bindings'][1] = copy.deepcopy(value['tool_bindings'][0])
+        value['tool_bindings'][1]['enabled'] = False
     if invalid == 'version': value['tool_bindings'][0]['tool_version'] = 999
     if invalid == 'unknown': value['tool_bindings'][0]['config']['arbitrary'] = True
     if invalid == 'queue': value['tool_bindings'][1]['config']['approved_destination_ids'] = ['queue:600']

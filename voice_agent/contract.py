@@ -2,12 +2,16 @@
 import copy
 import json
 from pathlib import Path
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, validators
+
+# PHP treats configuration integers strictly; JSON's 20.0 must not bypass it.
+StrictValidator = validators.extend(Draft202012Validator, type_checker=
+    Draft202012Validator.TYPE_CHECKER.redefine('integer', lambda checker, value: type(value) is int))
 
 SCHEMA = json.loads(Path(__file__).with_name("published-v1.schema.json").read_text())
-VALIDATOR = Draft202012Validator(SCHEMA)
-VALIDATORS = {1: VALIDATOR, 2: Draft202012Validator(json.loads(Path(__file__).with_name("published-v2.schema.json").read_text()))}
-VALIDATORS[3] = Draft202012Validator(json.loads(Path(__file__).with_name("published-v3.schema.json").read_text()))
+VALIDATOR = StrictValidator(SCHEMA)
+VALIDATORS = {1: VALIDATOR, 2: StrictValidator(json.loads(Path(__file__).with_name("published-v2.schema.json").read_text()))}
+VALIDATORS[3] = StrictValidator(json.loads(Path(__file__).with_name("published-v3.schema.json").read_text()))
 MAX_SNAPSHOT_BYTES = 64 * 1024
 
 
