@@ -8,8 +8,10 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from .monitoring import Monitoring
+from .transcripts import Transcripts
 from .providers import create_adapter
 from .providers.webhook import verify_webhook
 from .storage import trusted_target
@@ -46,6 +48,9 @@ class Call:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tasks: set = field(default_factory=set)
     observed_responses: set = field(default_factory=set)
+    started_at: object = field(default_factory=lambda: datetime.now(timezone.utc))
+    transcript_keys: set = field(default_factory=set)
+    transcript_bytes: int = 0
 
 
 class Transfer:
@@ -91,6 +96,7 @@ class Runtime:
     def __init__(self, storage, controller, adapter_factory=create_adapter):
         self.storage, self.controller, self.adapter_factory = storage, controller, adapter_factory
         self.monitoring = Monitoring(storage)
+        self.transcripts = Transcripts(storage, self.monitoring)
         self.calls = {}
         self.admitting = set()
         self.admissions = {}
@@ -114,6 +120,7 @@ class Runtime:
         except Exception:
             self.monitoring.degraded = True
         await self.monitoring.start()
+        await self.transcripts.start()
         await self.controller.start()
         self.spawn(self.expire_pending())
 
@@ -124,6 +131,7 @@ class Runtime:
             task.cancel()
         await asyncio.gather(*list(self.tasks), return_exceptions=True)
         await self.controller.stop()
+        await self.transcripts.stop()
         await self.monitoring.stop()
 
     async def event(self, event):
@@ -329,6 +337,8 @@ class Runtime:
             call.adapter = self.adapter_factory(call.binding)
             profile = dict(call.snapshot['conversation'])
             profile['prompt'] = profile.pop('instructions')
+            profile['prompt'] += '\n\n' + await call.tools.routing_context()
+            profile['_capture_transcripts'] = call.snapshot.get('debug', {}).get('transcription_enabled') is True
             await asyncio.wait_for(call.adapter.accept(call.provider_call_id, profile, call.tools.advertised()), timeout=15)
             stage='provider_sideband'
             await asyncio.wait_for(call.adapter.connect(call.provider_call_id), timeout=15)
@@ -355,6 +365,13 @@ class Runtime:
                         self.monitoring.emit(call.run_id,'response_completed',key='response:'+response_id)
                 if event.get('type') == 'error':
                     raise ValueError('provider_error')
+                if event.get('type') == 'transcript':
+                    try:
+                        self.transcripts.capture(call, event)
+                    except Exception:
+                        self.transcripts.failed(call)
+                if event.get('type') in ('transcript_failed', 'monitoring_gap') and profile['_capture_transcripts']:
+                    self.transcripts.failed(call)
                 if event.get('type') == 'tool_call':
                     if len(call.tasks)>=32 or len(self.tasks)>=512:
                         raise ValueError('tool_capacity_exceeded')
@@ -378,12 +395,15 @@ class Runtime:
 
     async def handle_tool(self,call,event):
         try:
+            tool_id = WIRE_IDS.get(event.get('name'))
+            self.monitoring.emit(call.run_id,'tool_started',tool_id=tool_id,key='started:'+str(event.get('invocation_id')))
             result=await call.tools.invoke(event.get('invocation_id'),event.get('name'),event.get('arguments'))
             if result.get('error'):
                 kind='tool_denied' if result['error'] in ('tool_denied','destination_denied','invalid_arguments') else 'tool_failed'
-                self.monitoring.emit(call.run_id,kind,error=result['error'],key=str(event.get('invocation_id')))
+                self.monitoring.emit(call.run_id,kind,error=result['error'],tool_id=tool_id,key=str(event.get('invocation_id')))
             else:
-                self.monitoring.emit(call.run_id,'tool_completed',tool_id=WIRE_IDS.get(event['name'],event['name']),key=str(event.get('invocation_id')))
+                count=len(result['destinations']) if isinstance(result.get('destinations'),list) else None
+                self.monitoring.emit(call.run_id,'tool_completed',tool_id=tool_id,key=str(event.get('invocation_id')),result_count=count)
             if not call.terminal:
                 await call.adapter.send_result(event['invocation_id'],result)
                 await call.adapter.respond(response_id=event.get('response_id'))

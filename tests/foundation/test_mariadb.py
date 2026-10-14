@@ -51,7 +51,8 @@ def test_published_binding_secretbox_matches_php_and_directory_is_read_only(monk
     repository = PublishedRepository(lambda: mysql.connector.connect(
         host='127.0.0.1',port=int(os.environ['M0_TEST_PORT']),user='m0_reader',password=''))
     snapshot=repository.load('receptionist')
-    assert snapshot['contract_version']==3
+    assert snapshot['contract_version']==4
+    assert snapshot['debug']['transcription_enabled'] is False
     assert snapshot['tool_bindings'][0]['config']=={'max_results':2}
 
 

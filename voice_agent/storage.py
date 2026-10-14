@@ -83,10 +83,16 @@ class Storage:
         with database('monitor') as db:
             with db.cursor() as cursor:
                 occurred=datetime.fromisoformat(event['occurred_at']).replace(tzinfo=None)
-                cursor.execute('INSERT IGNORE INTO asteriskcdrdb.voice_agent_run_events (event_id,run_id,event_type,error_code,tool_id,destination_id,occurred_at) VALUES (%s,%s,%s,%s,%s,%s,%s)', (event['event_id'], event['run_id'], event['event_type'], event.get('error_code'),event.get('tool_id'),event.get('destination_id'),occurred))
+                cursor.execute('INSERT IGNORE INTO asteriskcdrdb.voice_agent_run_events (event_id,run_id,event_type,error_code,tool_id,destination_id,occurred_at,result_count) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)', (event['event_id'], event['run_id'], event['event_type'], event.get('error_code'),event.get('tool_id'),event.get('destination_id'),occurred,event.get('result_count')))
                 if event.get('outcome'):
                     cursor.execute("UPDATE asteriskcdrdb.voice_agent_runs SET ended_at=%s,outcome=%s,error_code=%s WHERE run_id=%s AND (outcome='running' OR (outcome='interrupted' AND error_code='runtime_restarted'))", (occurred,event['outcome'],event.get('error_code'),event['run_id']))
                     cursor.execute("UPDATE asteriskcdrdb.voice_agent_pending_calls SET state='finished' WHERE run_id=%s", (event['run_id'],))
+
+    def transcript(self, turn):
+        with database('monitor') as db:
+            with db.cursor() as cursor:
+                cursor.execute('INSERT IGNORE INTO asteriskcdrdb.voice_agent_transcripts (event_id,run_id,position,content_encrypted,occurred_at,expires_at) SELECT %s,%s,%s,%s,%s,%s FROM asteriskcdrdb.voice_agent_runs WHERE run_id=%s AND NOW()<%s',
+                    (turn['event_id'],turn['run_id'],turn['position'],turn['content_encrypted'],turn['occurred_at'].replace(tzinfo=None),turn['expires_at'].replace(tzinfo=None),turn['run_id'],turn['expires_at'].replace(tzinfo=None)))
 
     def recover(self):
         with database('monitor') as db:

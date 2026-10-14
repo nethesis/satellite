@@ -27,7 +27,10 @@ class Monitoring:
                     if path.stat().st_size > 4096:
                         raise ValueError('invalid_outbox_event')
                     event = json.loads(path.read_text())
-                    if set(event)!={'event_id','run_id','event_type','outcome','error_code','tool_id','destination_id','occurred_at'} or str(uuid.UUID(event['event_id'])) != path.stem:
+                    required={'event_id','run_id','event_type','outcome','error_code','tool_id','destination_id','occurred_at'}
+                    if not required<=set(event) or set(event)-required-{'result_count'} or str(uuid.UUID(event['event_id'])) != path.stem:
+                        raise ValueError('invalid_outbox_event')
+                    if 'result_count' in event and (type(event['result_count']) is not int or not 0<=event['result_count']<=100):
                         raise ValueError('invalid_outbox_event')
                     uuid.UUID(event['run_id'])
                     datetime.fromisoformat(event['occurred_at'])
@@ -48,13 +51,15 @@ class Monitoring:
             except OSError:
                 pass
 
-    def emit(self, run_id, kind, *, outcome=None, error=None, key=None, tool_id=None, destination_id=None):
+    def emit(self, run_id, kind, *, outcome=None, error=None, key=None, tool_id=None, destination_id=None, result_count=None):
         event_id = str(uuid.uuid5(uuid.UUID(run_id), key or kind))
         if event_id in self.pending:
             return
         event = {'event_id':event_id,'run_id':run_id,'event_type':kind,'outcome':outcome,
                  'error_code':error,'tool_id':tool_id,'destination_id':destination_id,
                  'occurred_at':datetime.now(timezone.utc).isoformat()}
+        if type(result_count) is int and 0<=result_count<=100:
+            event['result_count']=result_count
         # Reserve room for all 32 admitted calls' terminal outcomes during outages.
         terminal=outcome is not None
         if len(self.pending) >= (256 if terminal else 192) or self.queue.full():
