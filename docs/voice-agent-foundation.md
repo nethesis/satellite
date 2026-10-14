@@ -5,7 +5,7 @@ PostgreSQL transcript store. PHP owns all configuration in MariaDB. The runner
 reads immutable published snapshots and owns provider sideband, ARI call control
 and the two allowlisted v0.1 tools. It has no configuration writer or push API.
 
-The PHP-owned v1 and v2 schemas are mirrored for runtime validation. `PublishedRepository`
+The PHP-owned v1, v2 and v3 schemas are mirrored for runtime validation. `PublishedRepository`
 loads only the enabled published MariaDB view through an injected connection,
 verifies row/JSON identity and returns a detached snapshot pinned at admission. See the sibling NethVoice repository's
 `docs/voice-agents-contract-v1.md` for IDs, bounds, ownership and grants.
@@ -79,7 +79,27 @@ safe stage/status codes; provider responses, credentials and call content are no
 logged. The signed webhook permits repeated unrelated SIP headers such as Via but
 continues to reject duplicate correlation headers.
 
-On the designated staging instance, a repaired trunk reaches provider SIP ringing.
-Live conversation verification still requires a correctly registered provider
-webhook and signing secret. See the sibling repository's
-`docs/voice-agents-ui-call-verification.md` for current evidence and limitations.
+## Version three tools and native transfer confirmation
+
+Version three pins immutable tool manifest version two and each agent's typed
+`tool_bindings`. The trusted registry validates tool configuration at admission,
+advertises only enabled operations and rejects disabled or wrong-version wire
+names. Directory search intersects current extension inventory with the enabled
+transfer tool's allowlist. Search result limits are strictly integer-valued. Older
+v1/v2 publications retain their original manifests and semantics.
+
+Before transferring, the runner subscribes to its own caller channel, assigns a
+fresh transfer token and removes the caller from provider media. A transfer is
+committed only after both Stasis release and the native wrapper's
+`VoiceAgentTransfer` event match that channel, token and approved destination.
+Either event order is supported. An acknowledgement of the ARI continuation alone
+does not establish success. Uncertain release and cancellation take safe cleanup
+paths; provider-leg deletion cannot prevent independent media-bridge cleanup.
+
+Four authorized synthetic OpenAI calls on nethvoice57 verified conversation,
+backend denial, approved native extension transfer and provider-disconnection
+fallback. One initial transfer failed and exposed the confirmation bug corrected
+above; the subsequent transfer passed. Grok has local adapter/emulator coverage
+but no live credential-backed result. See the sibling repository's
+`docs/voice-agents-receptionist-verification.md` for source/image provenance,
+cleanup, rollback and outstanding release gates.
