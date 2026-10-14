@@ -33,9 +33,10 @@ def test_published_binding_secretbox_matches_php_and_directory_is_read_only(monk
             db.close()
     monkeypatch.setattr(module,'database',config_only)
     monkeypatch.setenv('SATELLITE_AGENT_CONFIG_KEY','synthetic-disposable-key')
+    monkeypatch.setenv('OPENAI_API_KEY','synthetic-environment-key')
     with config_only('config') as db:
         cursor = db.cursor()
-        cursor.execute('SELECT binding_id FROM asterisk.voice_agent_runtime_bindings LIMIT 1')
+        cursor.execute("SELECT binding_id FROM asterisk.voice_agent_runtime_bindings WHERE JSON_UNQUOTE(JSON_EXTRACT(settings_json,'$.openai_project_id'))='proj_test'")
         binding_id = cursor.fetchone()[0]
         with pytest.raises(mysql.connector.Error):
             cursor.execute('SELECT secrets_encrypted FROM asterisk.voice_agent_bindings LIMIT 0')
@@ -47,3 +48,25 @@ def test_published_binding_secretbox_matches_php_and_directory_is_read_only(monk
     assert storage.targets() == [{'id':'extension:203','name':'Test extension'}]
     from voice_agent.tools import DEFINITIONS
     assert sorted(storage.tools(),key=lambda row:row['id'])==sorted(DEFINITIONS,key=lambda row:row['id'])
+
+
+@pytest.mark.skipif(not os.getenv('M0_TEST_PORT'),reason='disposable MariaDB not selected')
+def test_environment_binding_reads_key_only_at_admission(monkeypatch):
+    import mysql.connector
+    import voice_agent.storage as module
+    @contextmanager
+    def config_only(role):
+        assert role=='config'
+        db=mysql.connector.connect(host='127.0.0.1',port=int(os.environ['M0_TEST_PORT']),user='m0_reader',password='')
+        try: yield db
+        finally: db.close()
+    monkeypatch.setattr(module,'database',config_only)
+    monkeypatch.setenv('SATELLITE_AGENT_CONFIG_KEY','synthetic-disposable-key')
+    monkeypatch.setenv('OPENAI_API_KEY','synthetic-current-environment')
+    with config_only('config') as db:
+        cur=db.cursor()
+        cur.execute("SELECT binding_id FROM asterisk.voice_agent_runtime_bindings WHERE JSON_UNQUOTE(JSON_EXTRACT(settings_json,'$.openai_project_id'))='proj_env'")
+        binding_id=cur.fetchone()[0]
+    assert module.Storage().binding(binding_id)['api_key']=='synthetic-current-environment'
+    monkeypatch.delenv('OPENAI_API_KEY')
+    with pytest.raises(ValueError,match='provider_credentials_unavailable'): module.Storage().binding(binding_id)

@@ -33,7 +33,7 @@ def _instructions(profile: Mapping) -> str:
     prompt = _profile_value(profile, "prompt", "")
     language = _profile_value(profile, "language", "")
     if language and language.lower() not in ("auto", "automatic"):
-        return f"{prompt}\n\nSpeak and respond using this language code or name: {language}.".strip()
+        return f"{prompt}\n\nDefault response language: {language}. Switch language when the caller explicitly asks or makes a substantive request in another language. Do not infer language from accent, a name or a short greeting.".strip()
     return prompt
 
 
@@ -112,7 +112,9 @@ class _RealtimeAdapter:
             client = await self._client()
             async with client.post(url, headers=self._headers, json=body, allow_redirects=False) as response:
                 if not 200 <= response.status < 300:
-                    raise ProviderError(f"{self.provider} call control failed ({response.status})")
+                    error=ProviderError(f"{self.provider} call control failed ({response.status})")
+                    error.http_status=response.status
+                    raise error
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise ProviderError(f"{self.provider} call control unavailable") from exc
 

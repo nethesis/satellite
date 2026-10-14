@@ -62,7 +62,8 @@ async def test_signed_webhook_requires_live_pinned_pending_call_and_deduplicates
     data = {'call_id':'synthetic/provider:call','sip_headers':[
         {'name':'X-OS-Session-ID','value':call.session_id},
         {'name':'X-OS-Provider-Leg-ID','value':call.leg_id},
-        {'name':'X-OS-Agent-ID','value':'basic_voice'}]}
+        {'name':'X-OS-Agent-ID','value':'basic_voice'},
+        {'name':'Via','value':'synthetic-hop-1'},{'name':'Via','value':'synthetic-hop-2'}]}
     body, headers = sign(call, data)
     assert await runtime.webhook('openai',body,headers) == {'status':'accepted'}
     assert await runtime.webhook('openai',body,headers) == {'status':'duplicate'}
@@ -206,3 +207,65 @@ async def test_full_monitoring_queue_denies_new_admission_before_sip():
     storage.admit.assert_not_called()
     controller.originate_local.assert_not_awaited()
     controller.continue_channel.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_v2_fallback_pins_native_wrapper_without_model_dialplan():
+    runtime,storage,controller,snapshot=fixtures()
+    snapshot['contract_version']=2
+    snapshot['fallback_destination_id']='native:ivr-7,s,1'
+    call=await admit(runtime)
+    snapshot['fallback_destination_id']='hangup'
+    await runtime.finish(call,'fallback','test',fallback=True)
+    import hashlib
+    digest=hashlib.sha256(('basic_voice\0native:ivr-7,s,1').encode()).hexdigest()[:24]
+    controller.continue_channel.assert_awaited_with('synthetic-caller',{'context':'voice-agent-fallback-'+digest,'extension':'s','priority':1})
+
+
+@pytest.mark.parametrize('bridge_allocated', [False, True])
+@pytest.mark.asyncio
+async def test_caller_hangup_before_provider_connection_is_interrupted_not_completed(bridge_allocated):
+    runtime,storage,controller,snapshot=fixtures()
+    call=await admit(runtime)
+    if bridge_allocated: call.bridge_id='synthetic-pending-bridge'
+    await runtime.event({'type':'StasisEnd','channel':{'id':call.caller_id}})
+    await asyncio.sleep(0.01)
+    events=list(runtime.monitoring.queue._queue)
+    terminal=next(e for e in events if e.get('outcome'))
+    assert terminal['outcome']=='interrupted'
+    assert terminal['error_code']=='caller_cancelled_before_connect'
+
+
+@pytest.mark.asyncio
+async def test_connection_phases_and_response_metadata_are_bounded_and_deduplicated():
+    runtime, storage, controller, snapshot = fixtures()
+    call = await admit(runtime)
+    call.provider_call_id = 'synthetic-provider-call'
+    call.provider_answered.set()
+    class Adapter:
+        async def accept(self, *args): pass
+        async def connect(self, *args): pass
+        async def close(self): pass
+        async def respond(self, *args, **kwargs): pass
+        async def events(self):
+            for number in range(40):
+                event = {'type':'response_done','status':'completed','response_id':f'synthetic-{number}'}
+                yield event
+                yield event
+            yield {'type':'response_done','status':'failed','response_id':'failed-response'}
+            await asyncio.Event().wait()
+    runtime.adapter_factory = lambda binding: Adapter()
+    conversation = runtime.spawn(runtime.converse(call), call)
+    for _ in range(30):
+        if len(call.observed_responses) == 32: break
+        await asyncio.sleep(.01)
+    events = list(runtime.monitoring.queue._queue)
+    assert [event['event_type'] for event in events[:3]] == ['admitted','provider_connected','media_connected']
+    assert sum(event['event_type'] == 'response_completed' for event in events) == 32
+    assert len(call.observed_responses) == 32
+    assert all('response_id' not in event and 'transcript' not in event for event in events)
+    assert call.media_connected
+    await runtime.event({'type':'StasisEnd','channel':{'id':call.caller_id}})
+    await asyncio.gather(conversation, return_exceptions=True)
+    await asyncio.sleep(.01)
+    assert any(event.get('outcome') == 'completed' for event in runtime.monitoring.queue._queue)

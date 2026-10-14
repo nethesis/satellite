@@ -42,6 +42,11 @@ class Storage:
         master = os.environ['SATELLITE_AGENT_CONFIG_KEY'].encode()
         secret = SecretBox(hashlib.sha256(master).digest()).decrypt(base64.b64decode(row.pop('secrets_encrypted'), validate=True))
         row.update(json.loads(secret))
+        if not row.get('api_key'):
+            names=('OPENAI_API_KEY',) if row['provider']=='openai' else ('XAI_API_KEY','GROK_API_KEY')
+            row['api_key']=next((os.environ[name] for name in names if os.environ.get(name)),None)
+        if not isinstance(row.get('api_key'),str) or not row['api_key'] or any(c in row['api_key'] for c in '\r\n\x00'):
+            raise ValueError('provider_credentials_unavailable')
         row.update(json.loads(row.pop('settings_json')))
         if not re.fullmatch(r'VoiceAgentTrunk_[1-9][0-9]*', row['trunk_name']):
             raise ValueError('invalid_native_binding')

@@ -14,7 +14,7 @@ CONTRACT = ROOT / 'ns8-nethvoice/freepbx/var/www/html/freepbx/rest/lib/agents/co
 def test_php_python_contract_parity():
     valid = json.loads((CONTRACT / 'published-v1.example.json').read_text())
     cases = [valid]
-    for key, value in [('contract_version', 2), ('workflow_version', 0),
+    for key, value in [('contract_version', 3), ('workflow_version', 0),
                        ('agent_id', '../bad'), ('api_key', 'synthetic'),
                        ('enabled_tools', ['arbitrary.execute']), ('workflow_version', 1.0),
                        ('workflow_version', True), ('agent_id', 'bad\n'),
@@ -40,3 +40,14 @@ def test_schema_copies_are_identical():
     runtime_schema = ROOT / 'satellite/voice_agent/published-v1.schema.json'
     assert runtime_schema.read_bytes() == (CONTRACT / 'published-v1.schema.json').read_bytes()
     assert (ROOT/'satellite/voice_agent/tools-v1.json').read_bytes()==(CONTRACT/'tools-v1.json').read_bytes()
+
+
+@pytest.mark.parametrize("target", ["hangup", "extension:203", "native:ivr-7,s,1"])
+def test_v2_fallback_contract_is_shared_and_v1_remains_valid(target):
+    snapshot=json.loads((CONTRACT/'published-v1.example.json').read_text())
+    snapshot['contract_version']=2
+    snapshot['fallback_destination_id']=target
+    assert validate_snapshot(snapshot)['fallback_destination_id']==target
+    result=subprocess.run(['php',str(ROOT/'ns8-nethvoice/freepbx/tests/agents/validate.php')],input=json.dumps(snapshot),text=True,capture_output=True)
+    assert result.returncode==0
+    assert (CONTRACT/'published-v2.schema.json').read_bytes()==(ROOT/'satellite/voice_agent/published-v2.schema.json').read_bytes()

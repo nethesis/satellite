@@ -2,6 +2,8 @@
 import asyncio
 import copy
 import hmac
+import hashlib
+import logging
 import re
 import time
 import uuid
@@ -12,6 +14,9 @@ from .providers import create_adapter
 from .providers.webhook import verify_webhook
 from .storage import trusted_target
 from .tools import ToolRegistry, WIRE_IDS
+
+
+LOG=logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,6 +33,7 @@ class Call:
     adapter: object | None = None
     tools: object | None = None
     bridge_id: str | None = None
+    media_connected: bool = False
     provider_answered: asyncio.Event = field(default_factory=asyncio.Event)
     transfer_done: asyncio.Event = field(default_factory=asyncio.Event)
     transfer_target: dict | None = None
@@ -36,6 +42,7 @@ class Call:
     admitted: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tasks: set = field(default_factory=set)
+    observed_responses: set = field(default_factory=set)
 
 
 class Transfer:
@@ -156,12 +163,20 @@ class Runtime:
                 call.transfer_outcome = 'transferred' if kind == 'StasisEnd' and dialplan.get('context') == expected['context'] and dialplan.get('exten') == expected['extension'] else 'failed'
                 call.transfer_done.set()
             elif channel_id == call.caller_id:
-                self.spawn(self.finish(call, 'completed', fallback=False), call)
+                if call.media_connected:
+                    self.spawn(self.finish(call, 'completed', fallback=False), call)
+                else:
+                    self.spawn(self.finish(call,'interrupted','caller_cancelled_before_connect',fallback=False),call)
             else:
-                self.spawn(self.finish(call, 'fallback', 'provider_disconnected', fallback=True), call)
+                reason='provider_disconnected'
+                cause=event.get('cause')
+                if isinstance(cause,int) and 0<cause<128: reason=f'provider_hangup_{cause}'
+                LOG.warning('Voice agent phase=provider_channel error_code=%s',reason)
+                self.spawn(self.finish(call, 'fallback', reason, fallback=True), call)
 
     async def admit(self, channel, agent_id):
         call = None
+        stage='snapshot'
         try:
             if not re.fullmatch(r'[a-z][a-z0-9_-]{0,47}', agent_id):
                 raise ValueError('invalid_agent')
@@ -170,6 +185,7 @@ class Runtime:
             snapshot = await asyncio.wait_for(asyncio.to_thread(self.storage.snapshot, agent_id), timeout=5)
             if len(self.monitoring.pending)>=192:
                 raise ValueError('monitoring_capacity_exceeded')
+            stage='binding'
             binding = await asyncio.wait_for(asyncio.to_thread(self.storage.binding, snapshot['provider_binding_id']), timeout=5)
             if binding['provider'] != snapshot['provider']:
                 raise ValueError('provider_mismatch')
@@ -179,11 +195,13 @@ class Runtime:
             call = Call(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), channel['id'], copy.deepcopy(snapshot), copy.deepcopy(binding), linkedid)
             call.deadline = time.monotonic()+snapshot['max_call_duration_seconds']
             # Durable correlation exists before SIP origination or webhook acceptance.
+            stage='run_storage'
             await asyncio.wait_for(asyncio.to_thread(self.storage.admit, call), timeout=10)
             call.admitted=True
             self.calls[call.session_id] = call
             if asyncio.current_task() in self.tasks:
                 call.tasks.add(asyncio.current_task())
+            stage='tool_catalog'
             definitions=await asyncio.wait_for(asyncio.to_thread(self.storage.tools),timeout=5)
             call.tools = ToolRegistry(snapshot, self.storage.targets, Transfer(self, call),definitions)
             self.monitoring.emit(call.run_id, 'admitted')
@@ -191,10 +209,11 @@ class Runtime:
             if not isinstance(user, str) or not re.fullmatch(r'proj_[A-Za-z0-9_-]+|\+[1-9][0-9]{1,14}', user):
                 raise ValueError('invalid_provider_user')
             variables = {'__AGENT_SESSION_ID':call.session_id,'__AGENT_PROVIDER_LEG_ID':call.leg_id,
-                         '__VOICE_AGENT_ID':agent_id,'__AGENT_PROVIDER_USER':user,'__AGENT_PROVIDER_TRUNK':binding['trunk_name']}
+                         '__VOICE_AGENT_ID':agent_id,'__AGENT_PROVIDER_HOST':'sip.api.openai.com' if binding['provider']=='openai' else 'sip.voice.x.ai','__AGENT_PROVIDER_USER':user,'__AGENT_PROVIDER_TRUNK':binding['trunk_name']}
             await self.controller.set_variable(call.caller_id, 'VOICE_AGENT_ID', agent_id)
             if call.terminal:
                 return
+            stage='origination'
             await self.controller.originate_local(call.session_id, call.leg_id, variables)
             self.spawn(self.deadline(call, 30, setup=True), call)
             self.spawn(self.deadline(call, max(0,call.deadline-time.monotonic())), call)
@@ -202,9 +221,10 @@ class Runtime:
             if call:
                 await self.finish(call, 'interrupted', 'setup_cancelled', fallback=True)
             raise
-        except Exception:
+        except Exception as error:
+            LOG.warning('Voice agent phase=%s error_class=%s',stage,type(error).__name__)
             if call:
-                await self.finish(call, 'fallback', 'setup_failed', fallback=True)
+                await self.finish(call, 'fallback', 'setup_'+stage+'_failed', fallback=True)
             else:
                 try:
                     await self.controller.continue_channel(channel['id'])
@@ -248,10 +268,13 @@ class Runtime:
         if not isinstance(data, dict) or not isinstance(data.get('sip_headers'), list):
             return {'status':'ignored'}
         sip = {}
+        if len(data['sip_headers'])>128: return {'status':'ignored'}
+        correlation_headers={'x-os-session-id','x-os-provider-leg-id','x-os-agent-id'}
         for item in data['sip_headers']:
             if not isinstance(item, dict) or not isinstance(item.get('name'),str) or not isinstance(item.get('value'),str):
                 return {'status':'ignored'}
             name = item['name'].lower()
+            if name not in correlation_headers: continue
             if name in sip:
                 return {'status':'ignored'}
             sip[name] = item['value']
@@ -273,23 +296,35 @@ class Runtime:
         return {'status':'accepted'}
 
     async def converse(self, call):
+        stage='provider_accept'
         try:
             call.adapter = self.adapter_factory(call.binding)
             profile = dict(call.snapshot['conversation'])
             profile['prompt'] = profile.pop('instructions')
             await asyncio.wait_for(call.adapter.accept(call.provider_call_id, profile, call.tools.advertised()), timeout=15)
+            stage='provider_sideband'
             await asyncio.wait_for(call.adapter.connect(call.provider_call_id), timeout=15)
+            self.monitoring.emit(call.run_id,'provider_connected')
+            stage='provider_answer'
             await asyncio.wait_for(call.provider_answered.wait(),timeout=20)
             if call.terminal:
                 return
+            stage='media_bridge'
             call.bridge_id = str(uuid.uuid4())
             await self.controller.create_bridge(call.bridge_id)
             await self.controller.add_to_bridge(call.bridge_id, [call.caller_id,call.leg_id])
             await self.controller.set_variable(call.caller_id,'TIMEOUT(absolute)',max(1,int(call.deadline-time.monotonic())))
+            call.media_connected = True
+            self.monitoring.emit(call.run_id,'media_connected')
             self.spawn(self.greet(call,profile['greeting']),call)
             async for event in call.adapter.events():
                 if call.terminal:
                     break
+                if event.get('type')=='response_done' and event.get('status')=='completed':
+                    response_id=event.get('response_id')
+                    if isinstance(response_id,str) and len(response_id)<=128 and response_id not in call.observed_responses and len(call.observed_responses)<32:
+                        call.observed_responses.add(response_id)
+                        self.monitoring.emit(call.run_id,'response_completed',key='response:'+response_id)
                 if event.get('type') == 'error':
                     raise ValueError('provider_error')
                 if event.get('type') == 'tool_call':
@@ -300,8 +335,12 @@ class Runtime:
                 await self.finish(call,'fallback','provider_disconnected',fallback=True)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            await self.finish(call,'fallback','provider_unavailable',fallback=True)
+        except Exception as error:
+            status=getattr(error,'http_status',None)
+            code=stage+'_failed'
+            if isinstance(status,int) and 400<=status<600: code='provider_http_'+str(status)
+            LOG.warning('Voice agent phase=%s error_code=%s error_class=%s',stage,code,type(error).__name__)
+            await self.finish(call,'fallback',code,fallback=True)
 
     async def greet(self,call,greeting):
         try:
@@ -335,8 +374,14 @@ class Runtime:
             await call.tools.close(exclude=asyncio.current_task())
         if fallback:
             try:
-                target = trusted_target(call.snapshot['fallback_destination_id'])
-                if target['extension'] in [row['id'].split(':')[1] for row in await asyncio.to_thread(self.storage.targets)]:
+                if call.snapshot['contract_version']==2:
+                    await self.controller.continue_channel(call.caller_id,{'context':'voice-agent-fallback-'+hashlib.sha256((call.snapshot['agent_id']+'\0'+call.snapshot['fallback_destination_id']).encode()).hexdigest()[:24],'extension':'s','priority':1})
+                    target=None
+                else:
+                    target = trusted_target(call.snapshot['fallback_destination_id'])
+                if target is None:
+                    pass
+                elif target['extension'] in [row['id'].split(':')[1] for row in await asyncio.to_thread(self.storage.targets)]:
                     await self.controller.continue_channel(call.caller_id,target)
                 else:
                     await self.controller.continue_channel(call.caller_id)

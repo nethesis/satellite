@@ -105,7 +105,8 @@ async def _openai_accept_payload_path_and_hangup():
     url, options = session.posts[0]
     assert url.endswith("/calls/call%2F1/accept")
     assert options["json"]["audio"] == {"output": {"voice": "marin"}}
-    assert options["json"]["instructions"] == "Be concise\n\nSpeak and respond using this language code or name: it-IT."
+    assert options["json"]["instructions"].startswith("Be concise\n\nDefault response language: it-IT.")
+    assert "caller explicitly asks" in options["json"]["instructions"]
     assert options["json"]["tools"][0]["name"] == "nv_find_destinations_v1"
     await adapter.hangup("call/1")
     assert session.posts[1][0].endswith("/calls/call%2F1/hangup")

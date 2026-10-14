@@ -5,7 +5,7 @@ PostgreSQL transcript store. PHP owns all configuration in MariaDB. The runner
 reads immutable published snapshots and owns provider sideband, ARI call control
 and the two allowlisted v0.1 tools. It has no configuration writer or push API.
 
-The PHP-owned v1 schema is mirrored for runtime validation. `PublishedRepository`
+The PHP-owned v1 and v2 schemas are mirrored for runtime validation. `PublishedRepository`
 loads only the enabled published MariaDB view through an injected connection,
 verifies row/JSON identity and returns a detached snapshot pinned at admission. See the sibling NethVoice repository's
 `docs/voice-agents-contract-v1.md` for IDs, bounds, ownership and grants.
@@ -56,3 +56,30 @@ docker build -t nethvoice-satellite:v01-configuration .
 The MariaDB integration case requires the disposable test database prepared by
 the PHP harness; otherwise it reports a skip. Credentials must never be supplied
 through CLI arguments or printed in diagnostic output on a real installation.
+
+## Provider credentials and fallback version two
+
+An encrypted binding API key takes precedence. If it is absent, admission uses
+`OPENAI_API_KEY`, or `XAI_API_KEY` followed by `GROK_API_KEY`. Missing or malformed
+keys fail admission safely. NS8 copies only the required secrets into the private
+runner env file and refreshes it before startup.
+
+Version two adds Hangup and validated native FreePBX fallback destinations while
+retaining version-one compatibility. PHP emits a native fallback wrapper keyed by
+agent ID and fallback target, retaining wrappers for historical publications.
+The runner computes only that trusted wrapper name from the pinned snapshot; it
+does not accept model-supplied dialplan strings. Provider SIP hosts are fixed in
+admission, and the native dial string preserves the existing TLS proxy path.
+
+Default response language can change on a caller's explicit request or substantive
+utterance in another language. Provider connection, media bridge and completed
+responses produce bounded, deduplicated metadata events without transcripts or
+audio. Hangup before media connection is recorded as interrupted. Failures expose
+safe stage/status codes; provider responses, credentials and call content are not
+logged. The signed webhook permits repeated unrelated SIP headers such as Via but
+continues to reject duplicate correlation headers.
+
+On the designated staging instance, a repaired trunk reaches provider SIP ringing.
+Live conversation verification still requires a correctly registered provider
+webhook and signing secret. See the sibling repository's
+`docs/voice-agents-ui-call-verification.md` for current evidence and limitations.
