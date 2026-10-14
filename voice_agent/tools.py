@@ -5,22 +5,43 @@ import json
 from pathlib import Path
 
 DEFINITIONS = json.loads(Path(__file__).with_name('tools-v1.json').read_text())
-MANIFESTS = {item['id']:{'type':'function','name':item['wire_name'],'description':item['description'],'parameters':item['input_schema']} for item in DEFINITIONS}
-WIRE_IDS = {value['name']: key for key, value in MANIFESTS.items()}
+DEFINITIONS_V2 = json.loads(Path(__file__).with_name('tools-v2.json').read_text())
+SUPPORTED = {(item['id'], item['version']): item for item in DEFINITIONS + DEFINITIONS_V2}
+WIRE_IDS = {item['wire_name']: item['id'] for item in SUPPORTED.values()}
 
 
 class ToolRegistry:
     def __init__(self, snapshot, targets, controller, definitions=None):
-        if definitions is not None and sorted(definitions,key=lambda item:item['id']) != sorted(DEFINITIONS,key=lambda item:item['id']):
-            raise ValueError('unsupported_tool_definition')
         self.snapshot = copy.deepcopy(snapshot)
+        if snapshot['contract_version'] == 3:
+            from .contract import validate_snapshot
+            validate_snapshot(snapshot)
+            self.bindings = {b['tool_id']: copy.deepcopy(b) for b in snapshot['tool_bindings']}
+        else:
+            self.bindings = {item['id']: {'tool_id': item['id'], 'tool_version': 1,
+                'enabled': item['id'] in snapshot['enabled_tools'], 'config': {}}
+                for item in DEFINITIONS}
+        catalog = SUPPORTED if definitions is None else {}
+        if definitions is not None:
+            for item in definitions:
+                key = (item.get('id'), item.get('version'))
+                if key not in SUPPORTED or key in catalog or item != SUPPORTED[key]:
+                    raise ValueError('unsupported_tool_definition')
+                catalog[key] = item
+        self.manifests = {}
+        for key, binding in self.bindings.items():
+            definition = catalog.get((key, binding['tool_version']))
+            if definition is None:
+                raise ValueError('unsupported_tool_definition')
+            self.manifests[key] = {'type': 'function', 'name': definition['wire_name'],
+                'description': definition['description'], 'parameters': copy.deepcopy(definition['input_schema'])}
         self.targets = targets
         self.controller = controller
         self.invocations = {}
         self.lock = asyncio.Lock()
 
     def advertised(self):
-        return [copy.deepcopy(MANIFESTS[key]) for key in self.snapshot['enabled_tools'] if key in MANIFESTS]
+        return [copy.deepcopy(self.manifests[key]) for key, binding in self.bindings.items() if binding['enabled']]
 
     async def invoke(self, invocation_id, name, arguments):
         if not isinstance(name,str) or len(name)>128:
@@ -42,11 +63,15 @@ class ToolRegistry:
 
     async def _execute(self, name, arguments):
         tool_id = WIRE_IDS.get(name, name)
-        if tool_id not in MANIFESTS or tool_id not in self.snapshot['enabled_tools']:
+        if tool_id not in self.bindings or not self.bindings[tool_id]['enabled'] or (name in WIRE_IDS and name != self.manifests[tool_id]['name']):
             return {'error': 'tool_denied'}
         if not isinstance(arguments, dict):
             return {'error': 'invalid_arguments'}
-        allowed = set(self.snapshot['approved_destination_ids'])
+        if self.snapshot['contract_version'] == 3:
+            transfer = self.bindings.get('telephony.transfer')
+            allowed = set(transfer['config']['approved_destination_ids']) if transfer and transfer['enabled'] else set()
+        else:
+            allowed = set(self.snapshot['approved_destination_ids'])
         try:
             rows = await asyncio.wait_for(asyncio.to_thread(self.targets), timeout=5)
             rows = [row for row in rows if row['id'] in allowed]
@@ -54,8 +79,9 @@ class ToolRegistry:
                 query = arguments.get('query', '')
                 if set(arguments) - {'query'} or not isinstance(query, str) or len(query) > 100:
                     return {'error': 'invalid_arguments'}
+                limit = self.bindings[tool_id]['config'].get('max_results', 100)
                 query = query.casefold()
-                return {'destinations': [{'id': row['id'], 'name': row['name']} for row in rows if query in row['id'].casefold() or query in row['name'].casefold()][:100]}
+                return {'destinations': [{'id': row['id'], 'name': row['name']} for row in rows if query in row['id'].casefold() or query in row['name'].casefold()][:limit]}
             if set(arguments) != {'destination_id'} or not isinstance(arguments['destination_id'], str):
                 return {'error': 'invalid_arguments'}
             target = arguments['destination_id']

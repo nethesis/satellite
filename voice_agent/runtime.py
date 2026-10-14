@@ -244,7 +244,7 @@ class Runtime:
 
     async def deadline(self, call, seconds, setup=False):
         await asyncio.sleep(seconds)
-        if not call.terminal and (not setup or call.bridge_id is None):
+        if not call.terminal and (not setup or not call.media_connected):
             await self.finish(call, 'fallback', 'setup_timeout' if setup else 'duration_exceeded', fallback=True)
 
     async def webhook(self, provider, raw, headers):
@@ -374,7 +374,7 @@ class Runtime:
             await call.tools.close(exclude=asyncio.current_task())
         if fallback:
             try:
-                if call.snapshot['contract_version']==2:
+                if call.snapshot['contract_version']>=2:
                     await self.controller.continue_channel(call.caller_id,{'context':'voice-agent-fallback-'+hashlib.sha256((call.snapshot['agent_id']+'\0'+call.snapshot['fallback_destination_id']).encode()).hexdigest()[:24],'extension':'s','priority':1})
                     target=None
                 else:

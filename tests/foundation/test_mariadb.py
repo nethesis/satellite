@@ -46,8 +46,13 @@ def test_published_binding_secretbox_matches_php_and_directory_is_read_only(monk
     assert binding['api_key'] == 'synthetic-api'
     assert binding['trunk_name'].startswith('VoiceAgentTrunk_')
     assert storage.targets() == [{'id':'extension:203','name':'Test extension'}]
-    from voice_agent.tools import DEFINITIONS
-    assert sorted(storage.tools(),key=lambda row:row['id'])==sorted(DEFINITIONS,key=lambda row:row['id'])
+    from voice_agent.tools import DEFINITIONS, DEFINITIONS_V2
+    assert sorted(storage.tools(),key=lambda row:(row['id'],row['version']))==sorted(DEFINITIONS+DEFINITIONS_V2,key=lambda row:(row['id'],row['version']))
+    repository = PublishedRepository(lambda: mysql.connector.connect(
+        host='127.0.0.1',port=int(os.environ['M0_TEST_PORT']),user='m0_reader',password=''))
+    snapshot=repository.load('receptionist')
+    assert snapshot['contract_version']==3
+    assert snapshot['tool_bindings'][0]['config']=={'max_results':2}
 
 
 @pytest.mark.skipif(not os.getenv('M0_TEST_PORT'),reason='disposable MariaDB not selected')

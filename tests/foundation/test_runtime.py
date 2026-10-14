@@ -108,6 +108,17 @@ async def test_hangup_racing_transfer_is_not_success():
     assert not any(e['event_type']=='transfer_committed' for e in runtime.monitoring.queue._queue)
 
 
+@pytest.mark.asyncio
+async def test_setup_deadline_requires_connected_media_not_allocated_bridge():
+    runtime, storage, controller, snapshot = fixtures()
+    call = await admit(runtime)
+    call.bridge_id = 'partially-created-bridge'
+    assert not call.media_connected
+    await runtime.deadline(call, 0, setup=True)
+    assert call.terminal
+    controller.continue_channel.assert_awaited()
+
+
 def test_webhook_http_body_boundaries_and_public_route_isolation():
     runtime = MagicMock()
     runtime.webhook = AsyncMock(return_value={'status':'ignored'})
