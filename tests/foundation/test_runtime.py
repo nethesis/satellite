@@ -91,7 +91,14 @@ async def test_transfer_waits_for_confirmed_ari_release():
     transfer = asyncio.create_task(Transfer(runtime,call).transfer('extension:203'))
     await asyncio.sleep(0)
     assert not transfer.done()
-    await runtime.event({'type':'StasisEnd','channel':{'id':call.caller_id,'dialplan':{'context':'voice-agent-transfer','exten':'203'}}})
+    # Asterisk may report the old Stasis location. Release alone is not success.
+    await runtime.event({'type':'StasisEnd','channel':{'id':call.caller_id,'dialplan':{'context':'voice-agent-basic_voice','exten':'s'}}})
+    await asyncio.sleep(.01)
+    assert not transfer.done()
+    for token, destination in [('forged', 'extension:203'), (call.transfer_token, 'extension:204')]:
+        await runtime.event({'type':'ChannelUserevent','eventname':'VoiceAgentTransfer','channel':{'id':call.caller_id},'userevent':{'token':token,'destination_id':destination}})
+        assert not call.transfer_done.is_set()
+    await runtime.event({'type':'ChannelUserevent','eventname':'VoiceAgentTransfer','channel':{'id':call.caller_id},'userevent':{'token':call.transfer_token,'destination_id':'extension:203'}})
     assert await transfer == {'outcome':'transferred'}
     events = list(runtime.monitoring.queue._queue)
     assert any(e['event_type']=='transfer_committed' for e in events)
@@ -106,6 +113,54 @@ async def test_hangup_racing_transfer_is_not_success():
     await runtime.event({'type':'ChannelDestroyed','channel':{'id':call.caller_id}})
     assert await transfer == {'error':'transfer_failed'}
     assert not any(e['event_type']=='transfer_committed' for e in runtime.monitoring.queue._queue)
+
+
+@pytest.mark.asyncio
+async def test_native_ack_alone_does_not_commit_until_release():
+    runtime, storage, controller, snapshot = fixtures()
+    call = await admit(runtime)
+    call.bridge_id = 'owned-media-bridge'
+    transfer = asyncio.create_task(Transfer(runtime,call).transfer('extension:203'))
+    await asyncio.sleep(0)
+    controller.remove_from_bridge.assert_awaited_once_with('owned-media-bridge',[call.caller_id])
+    await runtime.event({'type':'ChannelUserevent','eventname':'VoiceAgentTransfer','channel':{'id':call.caller_id},'userevent':{'token':call.transfer_token,'destination_id':'extension:203'}})
+    assert not call.transfer_done.is_set()
+    await runtime.event({'type':'StasisEnd','channel':{'id':call.caller_id}})
+    assert await transfer == {'outcome':'transferred'}
+    controller.unsubscribe_channel.assert_awaited_once_with(call.caller_id)
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_released_channel_is_hung_up_instead_of_continued():
+    runtime, storage, controller, snapshot = fixtures()
+    call = await admit(runtime)
+    call.transfer_target = {'context':'voice-agent-transfer','extension':'203','priority':1}
+    call.transfer_released = True
+    await runtime.finish(call,'failed','transfer_unconfirmed',fallback=True)
+    controller.hangup.assert_any_await(call.caller_id)
+    controller.continue_channel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_transfer_schedules_safe_cleanup():
+    runtime, storage, controller, snapshot = fixtures()
+    call = await admit(runtime)
+    transfer = asyncio.create_task(Transfer(runtime,call).transfer('extension:203'))
+    await asyncio.sleep(0)
+    transfer.cancel()
+    await asyncio.gather(transfer,return_exceptions=True)
+    await asyncio.gather(*list(runtime.tasks),return_exceptions=True)
+    assert call.terminal
+    controller.continue_channel.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_fallback_continuation_hangs_up_the_owned_caller():
+    runtime, storage, controller, snapshot = fixtures()
+    call = await admit(runtime)
+    controller.continue_channel.side_effect=RuntimeError('unavailable')
+    await runtime.finish(call,'fallback','test_failure',fallback=True)
+    controller.hangup.assert_any_await(call.caller_id)
 
 
 @pytest.mark.asyncio

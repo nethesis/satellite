@@ -38,6 +38,9 @@ class Call:
     transfer_done: asyncio.Event = field(default_factory=asyncio.Event)
     transfer_target: dict | None = None
     transfer_outcome: str | None = None
+    transfer_token: str | None = None
+    transfer_released: bool = False
+    transfer_confirmed: bool = False
     terminal: bool = False
     admitted: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -56,10 +59,21 @@ class Transfer:
             if call.terminal or call.transfer_target:
                 return {'error': 'transfer_unavailable'}
             call.transfer_target = target
+            call.transfer_token = uuid.uuid4().hex
         self.runtime.monitoring.emit(call.run_id, 'transfer_requested',tool_id='telephony.transfer',destination_id=destination_id)
         try:
+            # Preserve a passive subscription after Stasis ends. The native wrapper
+            # acknowledges the exact destination with this one-use private token.
+            await self.runtime.controller.subscribe_channel(call.caller_id)
+            await self.runtime.controller.set_variable(call.caller_id,'VOICE_AGENT_TRANSFER_TOKEN',call.transfer_token)
+            if call.bridge_id:
+                await self.runtime.controller.remove_from_bridge(call.bridge_id,[call.caller_id])
             await self.runtime.controller.continue_channel(call.caller_id, target)
             await asyncio.wait_for(call.transfer_done.wait(), timeout=10)
+        except asyncio.CancelledError:
+            self.runtime.monitoring.emit(call.run_id,'transfer_uncertain',error='transfer_cancelled')
+            self.runtime.spawn(self.runtime.finish(call,'failed','transfer_cancelled',fallback=True),call)
+            raise
         except Exception:
             self.runtime.monitoring.emit(call.run_id, 'transfer_uncertain', error='transfer_unconfirmed')
             await self.runtime.finish(call, 'failed', 'transfer_unconfirmed', fallback=True)
@@ -151,6 +165,16 @@ class Runtime:
                     await self.controller.hangup(channel_id)
             else:
                 await self.controller.continue_channel(channel_id)
+        elif kind == 'ChannelUserevent' and event.get('eventname') == 'VoiceAgentTransfer':
+            call = next((c for c in self.calls.values() if channel_id == c.caller_id), None)
+            body = event.get('userevent') or {}
+            if call and not call.terminal and call.transfer_target and isinstance(body,dict):
+                token = body.get('token')
+                if isinstance(token,str) and token.isascii() and call.transfer_token and hmac.compare_digest(token,call.transfer_token) and body.get('destination_id') == 'extension:' + call.transfer_target['extension']:
+                    call.transfer_confirmed = True
+                    if call.transfer_released:
+                        call.transfer_outcome = 'transferred'
+                        call.transfer_done.set()
         elif kind in ('StasisEnd', 'ChannelDestroyed'):
             call = next((c for c in self.calls.values() if channel_id in (c.caller_id, c.leg_id)), None)
             if not call or call.terminal:
@@ -158,10 +182,14 @@ class Runtime:
                     self.admissions[channel_id].cancel()
                 return
             if channel_id == call.caller_id and call.transfer_target:
-                dialplan = channel.get('dialplan') or {}
-                expected = call.transfer_target
-                call.transfer_outcome = 'transferred' if kind == 'StasisEnd' and dialplan.get('context') == expected['context'] and dialplan.get('exten') == expected['extension'] else 'failed'
-                call.transfer_done.set()
+                if kind == 'StasisEnd':
+                    call.transfer_released = True
+                    if call.transfer_confirmed:
+                        call.transfer_outcome = 'transferred'
+                        call.transfer_done.set()
+                elif not (call.transfer_released and call.transfer_confirmed):
+                    call.transfer_outcome = 'failed'
+                    call.transfer_done.set()
             elif channel_id == call.caller_id:
                 if call.media_connected:
                     self.spawn(self.finish(call, 'completed', fallback=False), call)
@@ -372,7 +400,19 @@ class Runtime:
                 task.cancel()
         if call.tools:
             await call.tools.close(exclude=asyncio.current_task())
-        if fallback:
+        if call.transfer_target:
+            try:
+                await self.controller.unsubscribe_channel(call.caller_id)
+            except Exception:
+                pass
+        if fallback and call.transfer_released:
+            # ARI cannot continue a channel outside Stasis. Fail closed if the
+            # native owner could not be positively confirmed after release.
+            try:
+                await self.controller.hangup(call.caller_id)
+            except Exception:
+                pass
+        elif fallback:
             try:
                 if call.snapshot['contract_version']>=2:
                     await self.controller.continue_channel(call.caller_id,{'context':'voice-agent-fallback-'+hashlib.sha256((call.snapshot['agent_id']+'\0'+call.snapshot['fallback_destination_id']).encode()).hexdigest()[:24],'extension':'s','priority':1})
@@ -389,7 +429,10 @@ class Runtime:
                 try:
                     await self.controller.continue_channel(call.caller_id)
                 except Exception:
-                    pass
+                    try:
+                        await self.controller.hangup(call.caller_id)
+                    except Exception:
+                        pass
         try:
             await self.controller.hangup(call.leg_id)
             if call.bridge_id:

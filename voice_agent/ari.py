@@ -136,6 +136,14 @@ class AriController:
         await self.request("POST", f"/channels/{quote(channel_id, safe='')}/variable",
                            params={"variable": name, "value": str(value)})
 
+    async def subscribe_channel(self, channel_id):
+        await self.request('POST', f'/applications/{quote(self.app, safe="")}/subscription',
+                           params={'eventSource': 'channel:' + channel_id})
+
+    async def unsubscribe_channel(self, channel_id):
+        await self.request('DELETE', f'/applications/{quote(self.app, safe="")}/subscription',
+                           params={'eventSource': 'channel:' + channel_id})
+
     async def originate_local(self, session_id, channel_id, variables):
         return await self.request("POST", "/channels", params={
             "endpoint": f"Local/{session_id}@voice-agent-provider/n",
