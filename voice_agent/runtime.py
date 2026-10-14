@@ -435,10 +435,13 @@ class Runtime:
                         pass
         try:
             await self.controller.hangup(call.leg_id)
-            if call.bridge_id:
-                await self.controller.destroy_bridge(call.bridge_id)
         except Exception:
             pass
+        if call.bridge_id:
+            try:
+                await self.controller.destroy_bridge(call.bridge_id)
+            except Exception:
+                pass
         if call.adapter:
             try:
                 await asyncio.wait_for(call.adapter.close(),timeout=3)

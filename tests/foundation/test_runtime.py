@@ -164,6 +164,16 @@ async def test_failed_fallback_continuation_hangs_up_the_owned_caller():
 
 
 @pytest.mark.asyncio
+async def test_destroy_media_bridge_even_when_provider_leg_is_already_gone():
+    runtime, storage, controller, snapshot = fixtures()
+    call = await admit(runtime)
+    call.bridge_id = 'owned-media-bridge'
+    controller.hangup.side_effect=RuntimeError('already_gone')
+    await runtime.finish(call,'completed')
+    controller.destroy_bridge.assert_awaited_once_with('owned-media-bridge')
+
+
+@pytest.mark.asyncio
 async def test_setup_deadline_requires_connected_media_not_allocated_bridge():
     runtime, storage, controller, snapshot = fixtures()
     call = await admit(runtime)
