@@ -5,7 +5,7 @@ PostgreSQL transcript store. PHP owns all configuration in MariaDB. The runner
 reads immutable published snapshots and owns provider sideband, ARI call control
 and the two allowlisted v0.1 tools. It has no configuration writer or push API.
 
-The PHP-owned v1, v2 and v3 schemas are mirrored for runtime validation. `PublishedRepository`
+The PHP-owned v1–v4 schemas are mirrored for runtime validation. `PublishedRepository`
 loads only the enabled published MariaDB view through an injected connection,
 verifies row/JSON identity and returns a detached snapshot pinned at admission. See the sibling NethVoice repository's
 `docs/voice-agents-contract-v1.md` for IDs, bounds, ownership and grants.
@@ -103,3 +103,14 @@ above; the subsequent transfer passed. Grok has local adapter/emulator coverage
 but no live credential-backed result. See the sibling repository's
 `docs/voice-agents-receptionist-verification.md` for source/image provenance,
 cleanup, rollback and outstanding release gates.
+
+Version four adds an opt-in debug transcription policy with 1–24 hour expiry.
+Existing publications default to metadata only. The existing OpenAI observation
+adapter supplies caller/assistant turns to a separate bounded writer that encrypts
+text before queuing it; content failures do not fail voice control. The monitoring
+account has insert-only content access, and PHP handles authenticated reads, expiry
+and deletion. Native tool events now include request markers and directory result
+counts, while call-start routing context includes only granted extensions and
+explicit guidance to follow lookup with a real transfer tool invocation. See the
+sibling `docs/voice-agents-transfer-debug-verification.md` for the successful live
+named-target/echo test and the verified deletion of its synthetic content.
