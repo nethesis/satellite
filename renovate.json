@@ -2,5 +2,12 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>NethServer/.github:ns8"
+  ],
+  "packageRules": [
+    {
+      "description": "deepgram-sdk v4+ is a rewrite with breaking API changes: stay on 3.x until migrated",
+      "matchPackageNames": ["deepgram-sdk"],
+      "allowedVersions": "<4"
+    }
   ]
 }
