@@ -379,3 +379,37 @@ async def test_replace_transcript_embeddings_deletes_and_inserts(monkeypatch: py
     executed_sql = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
     assert "DELETE FROM transcript_chunks" in executed_sql
     assert "INSERT INTO transcript_chunks" in executed_sql
+
+
+def _embedding_metric(result: str) -> str:
+    from tests.metrics_helpers import sample_value
+
+    return sample_value("satellite_ai_calls_total", provider="openai", operation="embedding", result=result)
+
+
+@pytest.mark.asyncio
+async def test_replace_transcript_embeddings_counts_success(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(db, "_ensure_schema", lambda: None)
+    monkeypatch.setattr(db, "_split_text_for_embedding", lambda text: ["a"])
+    embedder = MagicMock(name="embedder")
+    embedder.embed_documents.return_value = [[1, 2, 3]]
+    monkeypatch.setattr(db, "OpenAIEmbeddings", MagicMock(return_value=embedder))
+    monkeypatch.setattr(db, "_connect", MagicMock(return_value=_make_conn()))
+
+    await run_in_threadpool(db.replace_transcript_embeddings, transcript_id=1, raw_transcription="a")
+
+    assert _embedding_metric("success") == "1"
+
+
+@pytest.mark.asyncio
+async def test_replace_transcript_embeddings_counts_failure(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(db, "_ensure_schema", lambda: None)
+    monkeypatch.setattr(db, "_split_text_for_embedding", lambda text: ["a"])
+    embedder = MagicMock(name="embedder")
+    embedder.embed_documents.side_effect = RuntimeError("quota")
+    monkeypatch.setattr(db, "OpenAIEmbeddings", MagicMock(return_value=embedder))
+
+    with pytest.raises(RuntimeError):
+        await run_in_threadpool(db.replace_transcript_embeddings, transcript_id=1, raw_transcription="a")
+
+    assert _embedding_metric("failure") == "1"

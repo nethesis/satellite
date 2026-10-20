@@ -14,6 +14,8 @@ from deepgram import (
     LiveOptions,
 )
 
+import metrics
+
 logger = logging.getLogger("deepgram_connector")
 logging.getLogger('websockets').setLevel(logging.INFO)
 
@@ -91,9 +93,16 @@ class DeepgramConnector:
             utterance_end_ms="1000",
             vad_events=True,
         )
-        if await self.dg_connection.start(options) is False:
+        try:
+            started = await self.dg_connection.start(options)
+        except Exception as error:
+            metrics.record_call("deepgram", "realtime_transcription", ok=False, error=error)
+            raise
+        if started is False:
+            metrics.record_call("deepgram", "realtime_transcription", ok=False)
             logger.error(f"Failed to start Deepgram connection for {self.uniqueid}")
             return
+        metrics.record_call("deepgram", "realtime_transcription", ok=True)
 
         self.transcription_start_monotonic = time.monotonic()
         self.connected = True

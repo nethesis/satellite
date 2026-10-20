@@ -93,3 +93,67 @@ async def test_on_error_is_awaitable_and_schedules_close():
     await connector.on_error(None, {"message": "boom"})
 
     connector.loop.call_soon_threadsafe.assert_called_once()
+
+
+class _FakeLiveConnection:
+    def __init__(self, start_result):
+        self._start_result = start_result
+
+    def on(self, event, handler):
+        pass
+
+    async def start(self, options):
+        if isinstance(self._start_result, Exception):
+            raise self._start_result
+        return self._start_result
+
+
+def _patch_deepgram_client(monkeypatch, start_result):
+    import deepgram_connector
+
+    connection = _FakeLiveConnection(start_result)
+    client = SimpleNamespace(
+        listen=SimpleNamespace(asyncwebsocket=SimpleNamespace(v=lambda version: connection))
+    )
+    monkeypatch.setattr(deepgram_connector, "DeepgramClient", lambda api_key: client)
+
+
+def _realtime_metric(result: str) -> str:
+    from tests.metrics_helpers import sample_value
+
+    return sample_value("satellite_ai_calls_total", provider="deepgram", operation="realtime_transcription", result=result)
+
+
+@pytest.mark.asyncio
+async def test_start_success_is_counted(monkeypatch):
+    _patch_deepgram_client(monkeypatch, True)
+    connector = _make_connector()
+    connector.read_audio_from_rtp = AsyncMock()
+    connector.send_audio_to_deepgram = AsyncMock()
+
+    await connector.start()
+
+    assert _realtime_metric("success") == "1"
+    assert _realtime_metric("failure") == "0"
+
+
+@pytest.mark.asyncio
+async def test_start_failure_is_counted(monkeypatch):
+    _patch_deepgram_client(monkeypatch, False)
+    connector = _make_connector()
+
+    await connector.start()
+
+    assert _realtime_metric("success") == "0"
+    assert _realtime_metric("failure") == "1"
+
+
+@pytest.mark.asyncio
+async def test_start_exception_is_counted_and_raised(monkeypatch):
+    _patch_deepgram_client(monkeypatch, RuntimeError("handshake failed"))
+    connector = _make_connector()
+
+    with pytest.raises(RuntimeError):
+        await connector.start()
+
+    assert _realtime_metric("failure") == "1"

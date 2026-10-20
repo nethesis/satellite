@@ -6,6 +6,16 @@ import asyncio
 from unittest.mock import AsyncMock
 from io import BytesIO
 
+import metrics
+
+
+@pytest.fixture(autouse=True)
+def _reset_metrics():
+    """Metrics are process-wide; start every test from a clean registry."""
+    metrics.reset()
+    yield
+    metrics.reset()
+
 
 @pytest.fixture
 def mock_deepgram_response():
