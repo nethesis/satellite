@@ -11,6 +11,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from langchain_openai import OpenAIEmbeddings
 
+import metrics
+
 logger = logging.getLogger("db")
 
 
@@ -384,7 +386,12 @@ def replace_transcript_embeddings(
         return 0
 
     embedder = OpenAIEmbeddings(model=_EMBEDDING_MODEL)
-    vectors = embedder.embed_documents(chunks)
+    try:
+        vectors = embedder.embed_documents(chunks)
+    except Exception as error:
+        metrics.record_call("openai", "embedding", ok=False, error=error)
+        raise
+    metrics.record_call("openai", "embedding", ok=True)
 
     with _connect() as conn:
         conn.execute("DELETE FROM transcript_chunks WHERE transcript_id = %s", (transcript_id,))

@@ -97,7 +97,7 @@ PGVECTOR_DATABASE=satellite
 
 #### Rest API Configuration
 - `HTTP_PORT`: Port for the HTTP server (default: 8000)
-- `API_TOKEN`: Optional static token for `/api/*` endpoints. If unset/empty, auth is disabled.
+- `API_TOKEN`: Optional static token for `/api/*` and `/metrics` endpoints. If unset/empty, auth is disabled.
 
 #### Postgres Vectorstore Configuration
 If `PGVECTOR_*` environment variables are set, `POST /api/get_transcription` can persist the raw transcription to Postgres when the request includes `persist=true` and a valid `uniqueid`.
@@ -231,6 +231,23 @@ curl -X POST http://127.0.0.1:8000/api/get_speech \
 Notes:
 - Text is split into 2000-character chunks (Deepgram input limit) and each chunk is synthesized sequentially; the resulting MP3 parts are concatenated.
 - Errors: `400` for missing text, `401` if `API_TOKEN` is set and auth is missing/invalid, `504` on Deepgram timeout, `502` if Deepgram is unreachable.
+
+#### `GET /metrics`
+
+Prometheus metrics about calls to the AI providers (Deepgram, OpenAI). Values are kept in memory and reset when Satellite restarts. If `API_TOKEN` is set, the same auth header as `/api/*` is required.
+
+```bash
+curl -s http://127.0.0.1:8000/metrics -H 'Authorization: Bearer YOUR_TOKEN'
+```
+
+- `satellite_ai_credit_exhausted{provider}` (gauge): `1` if the provider reported that the credit is exhausted (Deepgram `402`, OpenAI `429` with code `insufficient_quota`), `0` if the last call to the provider succeeded, `-1` if not known yet. Other errors leave the value unchanged.
+- `satellite_ai_calls_total{provider,operation,result}` (counter): calls to the providers, with `result` set to `success` or `failure`. Operations:
+  - `deepgram`: `transcription` (`/api/get_transcription`), `realtime_transcription` (live call stream start), `tts` (`/api/get_speech`, one call per text chunk)
+  - `openai`: `embedding`, `clean`, `summary`, `sentiment` (one call per text chunk)
+
+The live call stream does not expose a status code, so a failed `realtime_transcription` start never sets `satellite_ai_credit_exhausted` to `1`.
+
+The standard `process_*`, `python_gc_*` and `python_info` metrics of the API process are exposed too.
 
 ## Architecture
 

@@ -7,6 +7,8 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+import metrics
+
 
 logger = logging.getLogger("ai")
 
@@ -71,7 +73,18 @@ def _is_invalid_json_body_error(error: Exception) -> bool:
     return "parse the json body" in message or "not valid json" in message
 
 
-def _invoke_chain(chain, text: str, stage: str) -> str:
+def _invoke_chain(chain, text: str, stage: str, operation: str) -> str:
+    """Invoke chain, counting the outcome as an OpenAI call under operation."""
+    try:
+        content = _invoke_chain_with_retry(chain, text, stage)
+    except Exception as error:
+        metrics.record_call("openai", operation, ok=False, error=error)
+        raise
+    metrics.record_call("openai", operation, ok=True)
+    return content
+
+
+def _invoke_chain_with_retry(chain, text: str, stage: str) -> str:
     sanitized_text = _sanitize_text_for_llm(text)
     try:
         response = chain.invoke({"text": sanitized_text})
@@ -198,7 +211,7 @@ Maria Bianchi: Sì? dimmi pure
     for idx, chunk in enumerate(chunks):
         try:
             logger.debug("AI pipeline: cleaning chunk %d/%d (len=%d)", idx + 1, len(chunks), len(chunk))
-            cleaned_chunks.append(_invoke_chain(clean_chain, chunk, f"clean chunk {idx + 1}/{len(chunks)}"))
+            cleaned_chunks.append(_invoke_chain(clean_chain, chunk, f"clean chunk {idx + 1}/{len(chunks)}", "clean"))
         except Exception:
             logger.exception("AI pipeline: failed cleaning chunk %d/%d", idx + 1, len(chunks))
             raise
@@ -245,6 +258,7 @@ Summarize this chunk concisely.
                     summarize_chunk_chain,
                     chunk,
                     f"summarize chunk {idx + 1}/{len(summarize_chunks)}",
+                    "summary",
                 )
             )
         except Exception:
@@ -280,6 +294,7 @@ No preamble or conclusion.
             reduce_chain,
             "\n\n".join([s.strip() for s in chunk_summaries if s and s.strip()]),
             "reduce summaries",
+            "summary",
         )
     except Exception:
         logger.exception("AI pipeline: failed reducing chunk summaries")
@@ -315,7 +330,7 @@ example output:3
     sentiment_chain = sentiment_prompt | llm
 
     try:
-        sentiment_text = _invoke_chain(sentiment_chain, cleaned[:20000], "sentiment scoring")
+        sentiment_text = _invoke_chain(sentiment_chain, cleaned[:20000], "sentiment scoring", "sentiment")
     except Exception:
         logger.exception("AI pipeline: failed sentiment scoring")
         raise

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, Mock
 from io import BytesIO
 import httpx
+import json
 import os
 
 
@@ -745,3 +746,139 @@ class TestGetSpeech:
         response = client.post("/api/get_speech", data={"text": "hello"})
         assert response.status_code == 401
         assert "Deepgram API error" in response.json()["detail"]
+
+
+def _metric(text: str, name: str, **labels) -> str:
+    from tests.metrics_helpers import sample_value
+
+    return sample_value(name, text, **labels)
+
+
+def _mock_deepgram_client(mock_client_class, *, post):
+    mock_client = AsyncMock()
+    mock_client.post = post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    # A truthy __aexit__ would swallow the exception raised inside "async with".
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client_class.return_value = mock_client
+
+
+class TestMetricsEndpoint:
+    """Tests for the /metrics endpoint and AI call accounting."""
+
+    def test_metrics_returns_prometheus_text(self, client):
+        response = client.get("/metrics")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+        assert _metric(response.text, "satellite_ai_credit_exhausted", provider="deepgram") == "-1"
+
+    def test_metrics_auth_enabled_requires_token(self, client):
+        with patch.dict(os.environ, {"API_TOKEN": "secret"}):
+            response = client.get("/metrics")
+
+        assert response.status_code == 401
+
+    def test_metrics_auth_enabled_valid_token(self, client):
+        with patch.dict(os.environ, {"API_TOKEN": "secret"}):
+            response = client.get("/metrics", headers={"Authorization": "Bearer secret"})
+
+        assert response.status_code == 200
+
+    @patch("api.db.is_configured", return_value=False)
+    @patch("httpx.AsyncClient")
+    def test_transcription_success_is_counted(self, mock_client_class, mock_db, client, valid_wav_content):
+        mock_response = Mock()
+        mock_response.json.return_value = {"results": {"paragraphs": {"transcript": "hi"}}}
+        mock_response.raise_for_status = Mock()
+        _mock_deepgram_client(mock_client_class, post=AsyncMock(return_value=mock_response))
+
+        client.post(
+            "/api/get_transcription",
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
+        )
+
+        text = client.get("/metrics").text
+        assert _metric(text, "satellite_ai_calls_total", provider="deepgram", operation="transcription", result="success") == "1"
+        assert _metric(text, "satellite_ai_credit_exhausted", provider="deepgram") == "0"
+
+    @patch("api.db.is_configured", return_value=False)
+    @patch("httpx.AsyncClient")
+    def test_transcription_402_marks_credit_exhausted(self, mock_client_class, mock_db, client, valid_wav_content):
+        request = httpx.Request("POST", "https://api.deepgram.com/v1/listen")
+        mock_response = Mock()
+        mock_response.status_code = 402
+        mock_response.text = "Insufficient credits"
+        mock_response.raise_for_status = Mock(side_effect=httpx.HTTPStatusError(
+            "402", request=request, response=httpx.Response(402, request=request, text="Insufficient credits"),
+        ))
+        _mock_deepgram_client(mock_client_class, post=AsyncMock(return_value=mock_response))
+
+        response = client.post(
+            "/api/get_transcription",
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
+        )
+
+        assert response.status_code == 402
+        text = client.get("/metrics").text
+        assert _metric(text, "satellite_ai_calls_total", provider="deepgram", operation="transcription", result="failure") == "1"
+        assert _metric(text, "satellite_ai_credit_exhausted", provider="deepgram") == "1"
+
+    @patch("api.db.is_configured", return_value=False)
+    @patch("httpx.AsyncClient")
+    def test_transcription_timeout_is_counted_as_failure(self, mock_client_class, mock_db, client, valid_wav_content):
+        _mock_deepgram_client(mock_client_class, post=AsyncMock(side_effect=httpx.ReadTimeout("slow")))
+
+        response = client.post(
+            "/api/get_transcription",
+            files={"file": ("test.wav", valid_wav_content, "audio/wav")},
+            data={"uniqueid": "1234567890.1234"},
+        )
+
+        assert response.status_code == 504
+        text = client.get("/metrics").text
+        assert _metric(text, "satellite_ai_calls_total", provider="deepgram", operation="transcription", result="failure") == "1"
+        assert _metric(text, "satellite_ai_credit_exhausted", provider="deepgram") == "-1"
+
+    @patch("api._concat_and_boost_mp3_ffmpeg", new_callable=AsyncMock, return_value=b"AAABBB")
+    @patch("api._tts_chunk_to_bytes_sync", side_effect=[b"AAA", b"BBB"])
+    def test_tts_counts_each_chunk(self, mock_tts, mock_ffmpeg, client):
+        client.post("/api/get_speech", data={"text": "a" * 2001})
+
+        text = client.get("/metrics").text
+        assert _metric(text, "satellite_ai_calls_total", provider="deepgram", operation="tts", result="success") == "2"
+        assert _metric(text, "satellite_ai_credit_exhausted", provider="deepgram") == "0"
+
+    @patch("api._tts_chunk_to_bytes_sync")
+    def test_tts_402_marks_credit_exhausted(self, mock_tts, client):
+        from deepgram.clients.common.v1.errors import DeepgramApiError
+        mock_tts.side_effect = DeepgramApiError("Insufficient credits", "402")
+
+        response = client.post("/api/get_speech", data={"text": "hello"})
+
+        assert response.status_code == 402
+        text = client.get("/metrics").text
+        assert _metric(text, "satellite_ai_calls_total", provider="deepgram", operation="tts", result="failure") == "1"
+        assert _metric(text, "satellite_ai_credit_exhausted", provider="deepgram") == "1"
+
+    @patch("api.subprocess.run")
+    def test_call_processor_metrics_are_merged(self, mock_run, client):
+        import api
+        child = {
+            "ok": False,
+            "metrics": {
+                "calls": [["openai", "embedding", "success", 1], ["openai", "clean", "failure", 1]],
+                "credit_exhausted": {"deepgram": -1, "openai": 1},
+            },
+        }
+        mock_run.return_value = Mock(returncode=1, stdout=json.dumps(child).encode(), stderr=b"")
+
+        with pytest.raises(RuntimeError):
+            api._run_call_processor(transcript_id=1, raw_transcription="hi", summary=True)
+
+        text = client.get("/metrics").text
+        assert _metric(text, "satellite_ai_calls_total", provider="openai", operation="clean", result="failure") == "1"
+        assert _metric(text, "satellite_ai_calls_total", provider="openai", operation="embedding", result="success") == "1"
+        assert _metric(text, "satellite_ai_credit_exhausted", provider="openai") == "1"

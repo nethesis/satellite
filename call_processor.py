@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 import ai
 import db
+import metrics
 
 logger = logging.getLogger("call_processor")
 
@@ -46,7 +47,7 @@ def main() -> int:
 
             if not summary:
                 logger.info("Skipping AI summary/sentiment (summary=false)")
-                sys.stdout.write(json.dumps({"ok": True, "sentiment": None}))
+                sys.stdout.write(json.dumps({"ok": True, "sentiment": None, "metrics": metrics.snapshot()}))
                 return 0
 
             logger.info("Starting AI enrichment")
@@ -64,11 +65,11 @@ def main() -> int:
                 summary=summary,
                 sentiment=sentiment,
             )
-            sys.stdout.write(json.dumps({"ok": True, "sentiment": sentiment}))
+            sys.stdout.write(json.dumps({"ok": True, "sentiment": sentiment, "metrics": metrics.snapshot()}))
         return 0
     except Exception:
         logger.exception("Call processing failed")
-        sys.stdout.write(json.dumps({"ok": False}))
+        sys.stdout.write(json.dumps({"ok": False, "metrics": metrics.snapshot()}))
         return 1
 
 

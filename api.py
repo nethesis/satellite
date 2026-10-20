@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 import re
 import uuid
 import json
@@ -17,6 +17,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 import db
+import metrics
 
 app = FastAPI()
 logger = logging.getLogger("api")
@@ -265,6 +266,13 @@ def _run_call_processor(
             if line.strip():
                 logger.info("call_processor[%s]: %s", transcript_id, line)
 
+    try:
+        child_output = json.loads((proc.stdout or b"").decode("utf-8", errors="replace") or "null")
+    except ValueError:
+        child_output = None
+    if isinstance(child_output, dict):
+        metrics.merge(child_output.get("metrics"))
+
     if proc.returncode != 0:
         stderr_preview = (proc.stderr or b"")[:2000].decode("utf-8", errors="replace")
         stdout_preview = (proc.stdout or b"")[:2000].decode("utf-8", errors="replace")
@@ -350,25 +358,30 @@ async def get_speech(request: Request):
             audio_data = await run_in_threadpool(
                 _tts_chunk_to_bytes_sync, chunk, options
             )
+            metrics.record_call("deepgram", "tts", ok=True)
             logger.debug(
                 "Deepgram TTS response: chunk=%s/%s bytes=%s",
                 idx, len(chunks), len(audio_data),
             )
             audio_parts.append(audio_data)
     except DeepgramApiError as e:
+        metrics.record_call("deepgram", "tts", ok=False, error=e)
         status = int(e.status) if e.status else 502
         logger.error("Deepgram TTS API error: status=%s message=%s", e.status, e.message)
         raise HTTPException(
             status_code=status,
             detail=f"Deepgram API error: {e.message}",
         )
-    except httpx.TimeoutException:
+    except httpx.TimeoutException as e:
+        metrics.record_call("deepgram", "tts", ok=False, error=e)
         logger.warning("Deepgram TTS request timed out")
         raise HTTPException(status_code=504, detail="Deepgram request timed out")
     except httpx.RequestError as e:
+        metrics.record_call("deepgram", "tts", ok=False, error=e)
         logger.error("Deepgram TTS request failed: %s", str(e))
         raise HTTPException(status_code=502, detail="Failed to reach Deepgram")
     except Exception as e:
+        metrics.record_call("deepgram", "tts", ok=False, error=e)
         logger.exception("Unexpected error while calling Deepgram TTS")
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
@@ -539,7 +552,9 @@ async def get_transcription(
             except Exception:
                 logger.debug("Failed to log Deepgram response preview")
             response.raise_for_status()
+        metrics.record_call("deepgram", "transcription", ok=True)
     except httpx.HTTPStatusError as e:
+        metrics.record_call("deepgram", "transcription", ok=False, error=e)
         if transcript_id is not None:
             try:
                 await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
@@ -552,7 +567,8 @@ async def get_transcription(
         except Exception:
             logger.error("Deepgram API error (logging failed)")
         raise HTTPException(status_code=e.response.status_code, detail=f"Deepgram API error: {e.response.text}")
-    except httpx.TimeoutException:
+    except httpx.TimeoutException as e:
+        metrics.record_call("deepgram", "transcription", ok=False, error=e)
         logger.warning("Deepgram request timed out (uniqueid=%s)", uniqueid)
         if transcript_id is not None:
             try:
@@ -561,6 +577,7 @@ async def get_transcription(
                 logger.exception("Failed to update transcript state=failed")
         raise HTTPException(status_code=504, detail="Deepgram request timed out")
     except httpx.RequestError as e:
+        metrics.record_call("deepgram", "transcription", ok=False, error=e)
         logger.error("Deepgram request failed (uniqueid=%s): %s", uniqueid, str(e))
         if transcript_id is not None:
             try:
@@ -569,6 +586,7 @@ async def get_transcription(
                 logger.exception("Failed to update transcript state=failed")
         raise HTTPException(status_code=502, detail="Failed to reach Deepgram")
     except Exception as e:
+        metrics.record_call("deepgram", "transcription", ok=False, error=e)
         logger.exception("Unexpected error while calling Deepgram")
         if transcript_id is not None:
             try:
@@ -714,3 +732,8 @@ async def get_transcription(
 
 
 app.include_router(api_router)
+
+
+@app.get("/metrics", dependencies=[Depends(_require_api_token_if_configured)])
+def metrics_endpoint():
+    return PlainTextResponse(metrics.render(), media_type=metrics.CONTENT_TYPE)
