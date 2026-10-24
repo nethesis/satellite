@@ -352,3 +352,10 @@ podman run -e ASTERISK_URL -e MQTT_URL -e DEEPGRAM_API_KEY ... satellite
 
 ## License
 This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for details.
+
+## Voice agents alpha
+
+Voice agents support fresh v8 installations with matching NethVoice/Satellite
+images. Configuration is PHP/MariaDB-owned and activation happens on publication.
+See [architecture, installation and operations](docs/voice-agents.md) and
+[validation and acceptance gaps](docs/voice-agents-validation.md).
