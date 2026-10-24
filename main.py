@@ -116,12 +116,19 @@ async def realtime_call_transcription():
     await mqtt_client.disconnect()
     logger.info("Shutdown complete")
 
+
+def api_server_settings():
+    """Use the private bind address passed by the NS8 transcription unit."""
+    return {"host": os.getenv("HTTP_HOST", "127.0.0.1"),
+            "port": int(os.getenv("HTTP_PORT", "8000")),
+            "log_level": os.getenv("LOG_LEVEL", "info").lower()}
+
 if __name__ == "__main__":
     # Start API server in a background thread
     server_thread = threading.Thread(
         target=uvicorn.run,
         args=(api_app,),
-        kwargs={"host": "0.0.0.0", "port": int(os.getenv("HTTP_PORT", "8000")), "log_level": os.getenv("LOG_LEVEL", "info").lower()},
+        kwargs=api_server_settings(),
         daemon=True
     )
     server_thread.start()
