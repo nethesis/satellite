@@ -37,3 +37,16 @@ def test_unsupported_monitoring_formats_fail_closed(version):
     event['monitoring_version'] = version
     with pytest.raises(ValueError, match='invalid_outbox_event'):
         validate_event(event)
+
+
+def test_formerly_valid_v7_publication_is_rejected_without_conversion():
+    value = json.loads((CONTRACT/'published-v8.example.json').read_text())
+    value['contract_version'] = 7
+    value['tool_bindings'] = value['tool_bindings'][:3]
+    original = copy.deepcopy(value)
+    with pytest.raises(ValueError, match='invalid_snapshot'):
+        validate_snapshot(value)
+    result = subprocess.run(['php', str(ROOT/'ns8-nethvoice/freepbx/tests/agents/validate.php')],
+                            input=json.dumps(value), text=True, capture_output=True)
+    assert result.returncode == 1
+    assert value == original
