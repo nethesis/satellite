@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      nethvoice_ref:
+        description: Companion NethVoice revision for contract tests
+        required: false
+        default: voice_agents
 
 permissions:
   contents: read
@@ -13,15 +18,38 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: satellite
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          path: satellite
+
+      - name: Checkout companion contracts
+        uses: actions/checkout@v7
+        with:
+          repository: nethesis/ns8-nethvoice
+          ref: ${{ inputs.nethvoice_ref || (github.ref_name == 'main' && 'main' || 'voice_agents') }}
+          path: ns8-nethvoice
+
+      - name: Set up PHP contract validator
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, sodium
+          coverage: none
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.15'
+          python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: |
+            satellite/requirements.txt
+            satellite/requirements-agent.lock
+            satellite/requirements-dev.txt
 
       - name: Install system dependencies
         run: |
@@ -34,7 +62,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt -r requirements-agent.lock
           pip install -r requirements-dev.txt
 
       - name: Run tests with coverage
