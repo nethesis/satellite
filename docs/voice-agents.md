@@ -37,12 +37,24 @@ invented as zero. Metadata retention defaults to 90 days, controlled by
 `VOICE_AGENT_MONITORING_RETENTION_DAYS` (1–3650). Debug capture defaults off and
 has a separate 1–24 hour lifetime. Audio is never persisted by the media bridge.
 
-`python -m voice_agent.runner` binds its private HTTP listener to loopback. Set
+`python main.py` starts the shared application and binds the voice-agent HTTP
+listener to loopback. The standalone `python -m voice_agent.runner` remains for
+agent-only diagnostics and the standalone image. Set
 `VOICE_AGENT_RUNTIME_TOKEN` for authenticated `/internal/ready`; documentation and
 configuration routes are absent. Traefik forwards only the provider webhook prefix;
 exact provider routes verify raw bytes, timestamps and pending-call correlation.
 `VOICE_AGENT_ENABLED=true` permits call admission. NS8 generates private credentials
-and starts the runner independently of transcription. Keep Python on 3.12.13.
+and starts voice agents even when transcription is disabled. The shared process
+starts transcription and its separate private API only when either existing
+transcription flag is true. Each component owns a different ARI application;
+transcription connection failures retry without restarting agent calls. Shutdown
+closes both listeners, RTP/ARI/MQTT resources and per-request workers. Keep Python
+on 3.12.13.
+
+NethVoice currently wraps the published Satellite PR #56 image, pinned by digest
+in `build-images.sh`, and checks out its matching source revision in CI.
+**Before merging, replace that PR image with a versioned Satellite release and
+update the digest and CI revision together.**
 
 ## Checks and packaging
 
@@ -61,7 +73,11 @@ metrics. The sibling NethVoice `freepbx/tests/agents/run-foundation.sh`
 prepares disposable MariaDB, applies the fresh baseline repeatedly, tests grants and
 restore, and runs paired contracts. Without this harness DB-specific cases skip.
 The standalone image starts only the runner as UID/GID 65532. The normal image
-preserves `python main.py` transcription startup and includes the optional package.
+uses `python main.py` for the shared lifecycle. Set
+`SATELLITE_CALL_TRANSCRIPTION_ENABLED=true` or
+`SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED=true` to start transcription.
+The NethVoice image pin must be refreshed after these changes are published; its
+old PR image is rejected by the shared-lifecycle import check.
 Diagnostics remain in the source tree and are excluded from production images.
 
 Use exact image/source provenance, a protected backup and a zero-call gate for
@@ -69,3 +85,31 @@ staging. Rollback across the alpha reset needs matching pre-reset databases,
 secrets and images. Deployment-specific receipts stay outside published docs.
 See [validation](voice-agents-validation.md) for evidence and remaining gaps.
 Duplication, admission policy and graph workflows remain future work.
+
+## CleverAI is executed outside this runtime
+
+NethVoice can configure CleverAI trunks and agents. CleverAI uses OpenAI SIP, with
+the project's incoming-call webhook configured externally to point to CleverAI.
+No CleverAI webhook relay, automatic provisioning, API key or webhook secret is
+configured locally. CleverAI owns session acceptance, conversation settings,
+tools and monitoring.
+
+These agents use **Save** to request the shared `retrieveHelper.sh` PBX reload;
+there is no local Publish step. Native FreePBX destinations and VisualPlan handle
+routing and fallback. The native dialplan dials the managed OpenAI trunk directly,
+with a 20-second connection timeout, and does not enter `Stasis(voice-agent)`.
+Connection failures use the configured fallback; normal remote hangup ends the
+call. Transfers back into NethVoice are deferred.
+
+CleverAI configuration is outside the v8 publication contract. No dummy snapshot,
+local provider session, run, transcript or usage record is created. CleverAI
+trunks are excluded from `voice_agent_runtime_bindings`; local OpenAI/Grok
+publications, adapters and monitoring remain unchanged. Native CDR and unrelated
+Satellite transcription remain under their existing owners.
+
+The four outbound metadata headers use inherited PBX caller number/name and
+inbound `FROM_DID`, with the native `agent:<agent_id>` identity proposed for
+`X-OS-Extension` and for a missing DID. **CleverAI's acceptance/registration of that
+identity and empty caller fields is not verified:** the experimental dialplan was
+not available in the workspace. Real CleverAI calling, audio, webhook setup and
+remote identity mapping require external acceptance testing before rollout.

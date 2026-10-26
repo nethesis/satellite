@@ -48,7 +48,9 @@ environment requires its normal service restart under the active-call gate.
 Asterisk must load `chan_websocket` and support incoming JSON media/control on
 its private HTTP listener. Startup exercises these APIs before opening a paid
 provider session. No public media route, new service or database migration is
-required. Keep the agent runner and optional transcription supervisor independent.
+required. Keep voice-agent and transcription logic and ARI ownership separate within the
+shared Python application; transcription connection recovery must not restart
+agent calls.
 
 Monitoring identifies the primary WebSocket adapter as `live_ws`. Startup/media
 phases, safe failure codes and first output are separate observations. The
@@ -66,7 +68,7 @@ the canonical manifests and Satellite's argument/call-bound authorization remain
 strict. Live Responses and Grok receive their original schemas. Existing agents
 need no publication changes for this repair.
 
-Deployment must verify the paired Satellite archive pin/checksum and affected
+Deployment must verify the pinned Satellite image digest and matching CI source revision and affected
 production images. Drain calls before an upgrade. Rollback restores the preceding
 verified image; never restore an old configuration database over operator edits.
 Test helpers and provider budgets belong only in controlled staging, not images.
