@@ -10,7 +10,8 @@ The rewritten branches incorporate current main: NethVoice
 `1da25a1554b5a0c0ab350c7cd01079f9f3fb07d7`, Satellite
 `1599a81f9ea96f4aea47d2121252267c10976f5f`. Current executable runtime code
 is introduced by Satellite's call-execution commit; the paired NethVoice runtime
-pin identifies the complete source archive. Python remains 3.12.13.
+pin identifies the published base image; CI tests its matching source revision.
+Python remains 3.12.13.
 
 | Gate | Evidence |
 | --- | --- |
@@ -74,7 +75,125 @@ contracts and the exact current runtime source; source-only diagnostics are abse
 The standalone runner image was also built. Staging uses source-verified feature
 overlays on the saved installed image identities, including the watchdog fix.
 Exact image hashes and deployment receipts remain in protected local verification
-material, outside published documentation. FreePBX/module image results and the downloadable Satellite archive pin/checksum
+material, outside published documentation. FreePBX/module image results and the pinned published Satellite image digest
 are recorded with the paired NethVoice source. Verify that final pair before
 publishing a release. Local Docker builds omit optional BuildKit cache mounts
 where the host has no BuildKit plugin; production build recipes are unchanged.
+
+## CleverAI local integration — 2026-10-26
+
+Starting revisions: NethVoice `c2729414d6ca2c5e264416b33ee66b22b8a544e3`,
+Satellite `6ad35f66af1071e088e3905aa92eb596e2068416`, both on `voice_agents`.
+The existing PRs were open and their remote heads matched these revisions.
+Pre-existing NethVoice changes were saved as a patch before editing and preserved,
+including the shared `retrieveHelper.sh` reload request and deletion of the old
+agent-specific checker. No commits, pushes, builds, deployment or provider calls
+were performed. Satellite runtime code, publication schemas and runtime pin were
+not changed.
+
+Automated checks passed:
+
+- Disposable MariaDB/PHP foundation harness, including fresh-install rejection,
+  interrupted setup, repeated setup, immutable snapshots, restore and least-privilege
+  accounts. The CleverAI service regression also covers credential omission without
+  an encryption key or environment discovery, both directions of trunk compatibility,
+  forbidden local settings, Save activation/reload failure/retry, native readiness,
+  VisualPlan fallback/cycles, stable identities, revisions and in-use deletion guards.
+- Native dialplan generation using FreePBX extension classes from the existing alpha
+  image: four inherited SIP headers, PBX caller/DID sources, empty-DID fallback,
+  managed-trunk Dial with the existing 20-second connection timeout, failure fallback,
+  ANSWER/CANCEL termination guard, unconnected fallback and absence of Stasis/agent
+  events. Fallback uses a pinned resolved native destination across reloads.
+- 266 Satellite foundation tests, paired runner contract and native CDR/CEL checks.
+  CleverAI has no runtime publication or binding visibility and creates no synthetic
+  run. Existing local OpenAI/Grok runtime behavior remains covered.
+- UI type checking, lint, formatting and seven unit tests; nine focused browser
+  cases covering CleverAI trunk/create/edit/delete, local publishing and EN/IT
+  monitoring. Four NS8 agent-review tests and all nine native transcription
+  regressions passed.
+
+The optional full Wizard HTTP authentication harness was skipped because
+`M0_REST_AUTOLOAD` was not selected; existing access-envelope/CSRF checks passed.
+The initial system-Python run lacked runtime dependencies; the successful harness
+used the existing Python 3.12 test environment. Existing dependency deprecation
+warnings remain. No new dependencies were added.
+
+**External acceptance still required:** no real CleverAI call, wire-level SIP/audio
+check, human audio acceptance or external webhook provisioning was performed.
+The full experimental dialplan was not available locally. `agent:<agent_id>` is
+only the proposed stable `X-OS-Extension` identity; CleverAI's required registration
+or accepted value, and its handling of empty caller headers, remain unconfirmed.
+The generated failure/hangup paths are checked automatically, not proven against
+CleverAI/Asterisk live calls. Transfers back to NethVoice remain deferred.
+
+Changes are confined to the PHP service/native projection/dialplan, Agents UI and
+translations, the runtime binding view's external-execution filter, focused tests
+and maintained guides/validation notes. There are no table or publication-contract
+migrations and no development database conversion or erasure. To revert this local
+work, remove only the CleverAI additions while retaining the separately preserved
+pre-existing changes; do not reset the working trees wholesale. Local logs and the
+pre-existing patch are under `/tmp/cleverai-*` and are not release artifacts.
+
+
+## Published Satellite base — 2026-10-26
+
+NethVoice now consumes `ghcr.io/nethesis/satellite:pr-56`, verified in GHCR and
+pinned to `sha256:e7b765730884612500658824857c02b4ff7f2191d40768b40ebbd81fb1d7479b`.
+The image's source label is `407c73f266ab528267e28251beefdc1fc41e44ac`, the PR merge
+revision; its Git tree matches head `6ad35f66af1071e088e3905aa92eb596e2068416`.
+NethVoice CI checks out the exact image source revision for paired tests.
+
+Both entrypoints imported successfully in the downloaded image under Python
+3.12.13. Build-script smoke checks passed for the pinned default, local override,
+launcher/user setup and import-failure rejection. Shell syntax, CI YAML and diff
+checks passed. No full image build, hosted CI, deployment or provider calls ran.
+The source-archive results above remain historical evidence.
+
+**Merge gate:** replace the development PR image with a versioned Satellite
+release; update its digest and the matching CI source revision together.
+
+
+## Shared Python lifecycle — 2026-10-26
+
+The refactor starts from NethVoice `c2729414d6ca2c5e264416b33ee66b22b8a544e3`
+and Satellite `6ad35f66af1071e088e3905aa92eb596e2068416`, both on `voice_agents`.
+Both PRs were open with matching remote heads. Existing uncommitted work,
+including the preceding action/build cleanup and CleverAI changes, was preserved.
+
+`main.py` now owns the application lifecycle and both private HTTP servers on one
+event loop. `transcription.py` owns optional pipeline startup/retry/cleanup;
+`voice_agent/` retains call handling and its separate ARI application. Both current
+transcription flags, endpoint paths, authentication, credentials, schema and stored
+volumes remain in place. No persistent data was converted or removed. The obsolete
+NethVoice subprocess launcher and its supervisor-specific tests were removed.
+Normal MQTT/ARI failures recover within transcription. Shutdown cancels connector
+starts and connection tasks, closes transcription-owned media/RTP resources, drains
+HTTP requests and kills/reaps expired enrichment/ffmpeg workers. PostgreSQL connection
+attempts are bounded and startup schema work runs off the shared event loop.
+
+Python 3.12 validation:
+
+- Satellite runtime foundation: **261 passed, 5 skipped** (database-backed cases
+  require the disposable integration harness).
+- Satellite transcription/application: **156 passed, 1 skipped** (real Deepgram round-trip
+  requires provider credentials); existing aiohttp BasicAuth deprecation warnings remain.
+- Connector cleanup checks after adding concurrent-close coverage: **7 passed**.
+- NethVoice packaging and lifecycle checks: **28 passed**.
+- Actual SIGTERM/SIGINT shutdown and HTTP auth/path isolation passed for all four
+  transcription-flag combinations. A synthetic active agent call/runtime survived
+  transcription startup failure and recovery. Real disposable worker processes
+  were reaped on timeout, request cancellation and API shutdown.
+- Current source started/stopped in both modes as UID 65532 using the existing
+  published image's dependencies, with a read-only test source mount and no network.
+  This validates dependency compatibility; it is not a rebuilt/published image.
+- Shell syntax and both repository diff checks passed.
+
+The pinned PR #56 image predates the shared lifecycle. NethVoice deliberately
+rejects it at the import check. **Publish the updated Satellite image, refresh the
+image digest and CI source revision together, and replace the PR image with a
+versioned release before merge.** A local updated image can use `SATELLITE_IMAGE`.
+
+No commits, pushes, full image builds, deployment, real PBX/provider calls or
+human audio acceptance were performed. A fatal process failure now affects both
+components and is recovered by systemd; ordinary connection errors stay local.
+The earlier subprocess-supervisor and image observations above are historical.
