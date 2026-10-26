@@ -67,7 +67,7 @@ def _openai_realtime_tools(tools) -> list[dict]:
 
     This is model guidance, not authorization. Satellite still requires exactly
     one destination/callback reference and validates its call-bound permissions.
-    Live Responses and Grok must receive their original schemas.
+    Live Responses and Grok retain the runtime's one-of constraint.
     """
     result = copy.deepcopy(_tools(tools))
     for tool in result:
@@ -75,8 +75,11 @@ def _openai_realtime_tools(tools) -> list[dict]:
             continue
         from ..tools import SUPPORTED
         canonical = SUPPORTED[('pbx.transfer', 2)]['input_schema']
-        if tool.get('parameters') != canonical:
+        restricted = copy.deepcopy(canonical)
+        restricted['properties']['destination_id']['pattern'] = r'^(extension|queue):[0-9]{1,20}$(?![\s\S])'
+        if tool.get('parameters') not in (canonical, restricted):
             raise ValueError('unsupported_realtime_tool_schema')
+        tool['parameters'] = restricted
         tool['parameters'].pop('oneOf')
         tool['description'] += ' Supply exactly one of destination_id or candidate_ref, never both.'
     return result

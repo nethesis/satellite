@@ -1,4 +1,4 @@
-"""v6 typed routing: shared filtering, bounded data and native confirmed handoff."""
+"""Typed routing: shared filtering, bounded data and native confirmed handoff."""
 import asyncio
 import copy
 import json
@@ -55,10 +55,10 @@ async def test_policy_filter_pagination_disabled_and_deleted():
     controller.transfer.return_value = {'outcome': 'transferred'}
     inventory = rows()
     registry = ToolRegistry(enabled(), lambda: inventory, controller)
-    page = await registry.invoke('page1', 'pbx.find_destinations', {'limit': 2})
-    assert [r['id'] for r in page['destinations']] == ['extension:203', 'ivr:7']
-    assert page['next_offset'] == 2
-    page = await registry.invoke('page2', 'pbx.find_destinations', {'offset': 2, 'limit': 2})
+    page = await registry.invoke('page1', 'pbx.find_destinations', {'limit': 1})
+    assert [r['id'] for r in page['destinations']] == ['extension:203']
+    assert page['next_offset'] == 1
+    page = await registry.invoke('page2', 'pbx.find_destinations', {'offset': 1, 'limit': 2})
     assert [r['id'] for r in page['destinations']] == ['queue:600']
     assert page['next_offset'] is None
     for dest in ('extension:204', 'queue:601', 'ivr:99'):
@@ -93,16 +93,15 @@ async def test_untrusted_context_and_independent_defaults():
     assert (await denied_registry.invoke('purpose-denied', 'pbx.find_destinations', {'query': 'Technical help'}))['destinations'] == []
     assert 'Technical help' not in await denied_registry.routing_context()
     result = await registry.invoke('ivr', 'pbx.find_destinations', {'query': 'Main menu'})
-    menu = result['destinations'][0]
-    assert 'cycle' in json.dumps(menu)
-    assert 'Private' not in json.dumps(menu)
+    assert result['destinations'] == []
+    assert 'Main menu' not in context
     defaults = ToolRegistry(snapshot(), rows, AsyncMock())
     assert {tool['name'] for tool in defaults.advertised()} == {'nv_pbx_find_destinations_v1','nv_pbx_transfer_v2'}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('destination,context', [('queue:600', 'voice-agent-transfer-queue'), ('ivr:7', 'voice-agent-transfer-ivr')])
-async def test_native_transfer_requires_matching_token_destination_and_release(destination, context):
+async def test_native_transfer_requires_matching_token_destination_and_release():
+    destination, context = 'queue:600', 'voice-agent-transfer-queue'
     from test_runtime import fixtures
     from voice_agent.runtime import Transfer
     from voice_agent.tools import DEFINITIONS
@@ -161,28 +160,36 @@ async def test_context_bounds_and_hostile_data_are_preserved_as_data():
 
 
 @pytest.mark.asyncio
-async def test_ivr_depth_and_branch_bounds_and_no_indirect_grants():
-    inventory = [{'id': f'ivr:{i}', 'name': f'Menu {i}', 'branches': [{'selection': '1', 'destination_id': f'ivr:{i+1}'}]} for i in range(7)]
-    registry = ToolRegistry(enabled(), lambda: inventory, AsyncMock())
-    page = await registry.invoke('depth', 'pbx.find_destinations', {'query': 'Menu 0'})
-    assert 'depth_limit' in json.dumps(page)
-    inventory[0]['branches'] *= 100
-    page = await registry.invoke('wide', 'pbx.find_destinations', {'query': 'Menu 0'})
-    assert 'branch_limit' in json.dumps(page)
-    # A menu branch never authorizes a separate direct transfer.
+async def test_ivr_routing_is_denied_even_with_saved_grants():
+    from jsonschema import Draft202012Validator
+    from voice_agent.storage import trusted_target
+    from voice_agent.routing import RoutingPolicy
     controller = AsyncMock()
-    registry = ToolRegistry(enabled(), rows, controller)
+    value = enabled()  # An immutable v8 publication can still carry the retired flag.
+    registry = ToolRegistry(value, rows, controller)
+    assert not RoutingPolicy(value).permits('ivr:7')
+    assert (await registry.invoke('find-ivr', 'pbx.find_destinations', {'query': 'Main menu'}))['destinations'] == []
+    assert await registry.invoke('ivr', 'pbx.transfer', {'destination_id': 'ivr:7'}) == {'error': 'destination_denied'}
     assert await registry.invoke('indirect', 'pbx.transfer', {'destination_id': 'extension:204'}) == {'error': 'destination_denied'}
+    controller.transfer.assert_not_awaited()
+    with pytest.raises(ValueError, match='invalid_destination'):
+        trusted_target('ivr:7', allow_pbx=True)
+    for manifest in registry.advertised():
+        assert 'ivr' not in manifest['description'].lower()
+        if manifest['name'] == 'nv_pbx_transfer_v2':
+            assert not Draft202012Validator(manifest['parameters']).is_valid({'destination_id': 'ivr:7'})
+    assert 'Main menu' not in await registry.routing_context()
 
 
 @pytest.mark.asyncio
-async def test_queue_and_ivr_defaults_new_targets_renames_and_category_off():
+async def test_queue_defaults_new_targets_renames_and_category_off():
     controller = AsyncMock()
     value = enabled()
     inventory = rows() + [{'id': 'queue:700', 'name': 'New team'}, {'id': 'ivr:9', 'name': 'New menu'}, {'id': 'extension:205', 'name': 'New person'}]
     registry = ToolRegistry(value, lambda: inventory, controller)
     found = await registry.invoke('new', 'pbx.find_destinations', {})
-    assert {'queue:700', 'ivr:9'} <= {r['id'] for r in found['destinations']}
+    assert 'queue:700' in {r['id'] for r in found['destinations']}
+    assert not any(r['id'].startswith('ivr:') for r in found['destinations'])
     assert 'extension:205' not in {r['id'] for r in found['destinations']}
     inventory[0]['name'] = 'Renamed Alice'
     found = await registry.invoke('renamed', 'pbx.find_destinations', {'query': 'Renamed'})
@@ -225,7 +232,7 @@ async def test_typed_uncertain_handoff_never_reports_success(released):
         if released:
             await runtime.event({'type': 'StasisEnd', 'channel': {'id': call.caller_id}})
     controller.continue_channel.side_effect = continuing
-    result = await Transfer(runtime, call).transfer('ivr:7')
+    result = await Transfer(runtime, call).transfer('queue:600')
     assert result == {'error': 'transfer_uncertain'}
     assert call.terminal
     assert not any(e['event_type'] == 'transfer_committed' for e in runtime.monitoring.queue._queue)

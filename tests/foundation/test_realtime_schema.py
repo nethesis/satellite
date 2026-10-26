@@ -33,6 +33,7 @@ async def test_realtime_projects_transfer_schema_without_mutating_the_manifest()
         transfer = next(t for t in accepted[0]['tools'] if t['name'] == 'nv_pbx_transfer_v2')
         expected = copy.deepcopy(original[1]['input_schema'])
         expected.pop('oneOf')
+        expected['properties']['destination_id']['pattern'] = r'^(extension|queue):[0-9]{1,20}$(?![\s\S])'
         assert transfer['parameters'] == expected
         assert 'exactly one' in transfer['description']
         assert DEFINITIONS == original
