@@ -71,5 +71,5 @@ EXPOSE ${HTTP_PORT}
 
 USER satellite
 
-# Run the application
+# One application owns voice agents and optional transcription startup/shutdown.
 CMD ["python", "main.py"]
