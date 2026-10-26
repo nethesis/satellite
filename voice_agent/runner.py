@@ -72,6 +72,17 @@ def settings():
     return host, port
 
 
+def app_from_env():
+    runtime = None
+    if os.getenv('VOICE_AGENT_ENABLED') == 'true':
+        from .ari import AriController
+        from .runtime import Runtime
+        from .storage import Storage
+        runtime = Runtime(Storage(), AriController(os.environ['ASTERISK_URL'],
+            os.environ['ARI_USERNAME'], os.environ['SATELLITE_ARI_PASSWORD'], app='voice-agent'))
+    return create_app(os.getenv('VOICE_AGENT_RUNTIME_TOKEN', ''), runtime)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--check-snapshot', type=Path, help='Validate a synthetic snapshot offline')
@@ -81,14 +92,7 @@ def main():
         print(json.dumps({'valid': True, 'contract_version': 8}))
         return
     host, port = settings()
-    runtime = None
-    if os.getenv('VOICE_AGENT_ENABLED') == 'true':
-        from .ari import AriController
-        from .runtime import Runtime
-        from .storage import Storage
-        runtime = Runtime(Storage(), AriController(os.environ['ASTERISK_URL'],
-            os.environ['ARI_USERNAME'], os.environ['SATELLITE_ARI_PASSWORD'], app='voice-agent'))
-    app = create_app(os.getenv('VOICE_AGENT_RUNTIME_TOKEN', ''), runtime)
+    app = app_from_env()
     uvicorn.run(app, host=host, port=port, access_log=False)
 
 
