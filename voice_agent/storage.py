@@ -114,30 +114,10 @@ class Storage:
         with database('config') as db:
             with db.cursor(dictionary=True) as cursor:
                 cursor.execute("SELECT id,name,'' description FROM asterisk.voice_agent_extension_directory "
-                               "UNION ALL SELECT id,name,description FROM asterisk.voice_agent_queue_directory "
-                               "UNION ALL SELECT id,name,description FROM asterisk.voice_agent_ivr_directory ORDER BY id LIMIT 10001")
+                               "UNION ALL SELECT id,name,description FROM asterisk.voice_agent_queue_directory ORDER BY id LIMIT 10001")
                 rows = cursor.fetchall()
                 if len(rows) > 10000:
                     raise ValueError('directory_capacity_exceeded')
-                cursor.execute('SELECT id,selection,destination FROM asterisk.voice_agent_ivr_branches ORDER BY id,selection LIMIT 50001')
-                branches = cursor.fetchall()
-                if len(branches) > 50000:
-                    raise ValueError('directory_capacity_exceeded')
-        native = {}
-        inventory = {row['id']: row for row in rows}
-        for row in rows:
-            kind, number = row['id'].split(':', 1)
-            key = {'extension': f'from-did-direct,{number},1', 'queue': f'ext-queues,{number},1', 'ivr': f'ivr-{number},s,1'}[kind]
-            native[key] = row['id']
-        for branch in branches:
-            row = inventory.get(branch['id'])
-            if row is None:
-                continue
-            items = row.setdefault('branches', [])
-            if len(items) >= 50:
-                row['context_status'] = 'branch_limit'
-            else:
-                items.append({'selection': branch['selection'], 'destination_id': native.get(branch['destination'])})
         return rows
 
     def tools(self):
@@ -225,7 +205,7 @@ class Storage:
 
 
 def trusted_target(destination_id, *, allow_pbx=False):
-    pattern = r'(extension|queue|ivr):[0-9]{1,20}' if allow_pbx else r'extension:[0-9]{1,20}'
+    pattern = r'(extension|queue):[0-9]{1,20}' if allow_pbx else r'extension:[0-9]{1,20}'
     if not isinstance(destination_id, str) or not re.fullmatch(pattern, destination_id):
         raise ValueError('invalid_destination')
     kind, number = destination_id.split(':', 1)

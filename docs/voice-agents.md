@@ -15,10 +15,13 @@ transfer, recent-caller lookup and optional owned-channel hangup.
 The runner validates contract, provider capability and trusted tool definitions
 before paid provider usage. The conversation's model and voice belong to the
 agent; stale trunk model settings cannot override them. Direct extensions are
-initially disabled, queues enabled, IVRs disabled, callbacks enabled for seven
+initially disabled, queues enabled, callbacks enabled for seven
 days, and call ending disabled. Callback evidence is short-lived and bound to
 the inbound caller, live session, agent and publication. A model cannot supply
 an authoritative number or turn a direct destination into callback evidence.
+IVR routing is removed: directories, model advertisements and transfer execution
+support extensions and queues only. Existing v8 IVR fields are inert and do not
+authorize transfers. Native administrator-selected fallback routing is unchanged.
 
 Realtime and Grok use separate SIP/sideband adapters. GPT-Live uses primary
 WebSocket audio through private Asterisk `chan_websocket`; see

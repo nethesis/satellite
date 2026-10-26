@@ -1,8 +1,7 @@
-"""Typed PBX routing policy; imported names and menu text are always untrusted."""
-import copy
+"""Typed PBX routing policy; imported names and descriptions are always untrusted."""
 import re
 
-ID = re.compile(r'(extension|queue|ivr):[0-9]{1,20}\Z')
+ID = re.compile(r'(extension|queue):[0-9]{1,20}\Z')
 
 
 class RoutingPolicy:
@@ -33,30 +32,6 @@ class RoutingPolicy:
         inventory = {row['id']: row for row in rows if isinstance(row.get('id'), str) and ID.fullmatch(row['id']) and row.get('available', True)}
         descriptions = {d['destination_id']: d['description'] for d in self.binding['config']['descriptions']} if self.binding else {}
 
-        def describe(row, path, depth, budget):
-            item = {'id': row['id'], 'name': str(row['name'])[:100], 'description': str(descriptions.get(row['id'], row.get('description', '')))[:500]}
-            if row['id'].startswith('ivr:'):
-                if row['id'] in path:
-                    item['context_status'] = 'cycle'
-                elif depth >= 4:
-                    item['context_status'] = 'depth_limit'
-                else:
-                    item['branches'] = []
-                    for branch in row.get('branches', []):
-                        if budget[0] <= 0:
-                            item['context_status'] = 'branch_limit'
-                            break
-                        budget[0] -= 1
-                        detail = {'selection': str(branch.get('selection', ''))[:30]}
-                        target = inventory.get(branch.get('destination_id'))
-                        if target and self.permits(target['id']):
-                            detail['destination'] = describe(target, path | {row['id']}, depth + 1, budget)
-                        else:
-                            # Native IVR behavior may reach a destination without a
-                            # direct grant. Do not leak denied directory names/IDs.
-                            detail['context_status'] = 'native_behavior_only' if target else 'unknown'
-                        item['branches'].append(detail)
-                    if row.get('context_status'):
-                        item['context_status'] = row['context_status']
-            return item
-        return [describe(inventory[key], set(), 0, [50]) for key in sorted(inventory) if self.permits(key)]
+        return [{'id': row['id'], 'name': str(row['name'])[:100],
+                 'description': str(descriptions.get(row['id'], row.get('description', '')))[:500]}
+                for key, row in sorted(inventory.items()) if self.permits(key)]
