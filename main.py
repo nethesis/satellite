@@ -1,129 +1,78 @@
+"""Satellite application: voice agents and optional transcription on one event loop."""
 import asyncio
+from contextlib import nullcontext
+import ipaddress
 import logging
 import os
 import signal
+
 from dotenv import load_dotenv
-import threading
 import uvicorn
-from api import app as api_app
-from asterisk_bridge import AsteriskBridge
-from mqtt_client import MQTTClient
-from rtp_server import RTPServer
+
+from voice_agent.runner import app_from_env, settings
 
 
-# Load environment variables
-load_dotenv(dotenv_path=".env")
+def api_server_settings():
+    host = os.getenv("HTTP_HOST", "127.0.0.1")
+    if not ipaddress.ip_address(host).is_loopback:
+        raise ValueError("loopback_bind_required")
+    return {"host": host, "port": int(os.getenv("HTTP_PORT", "8000")),
+            "log_level": os.getenv("LOG_LEVEL", "info").lower()}
 
-# Configure logging
-log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
-log_level = getattr(logging, log_level_str, logging.INFO)
-logging.basicConfig(
-    level=log_level,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
-)
-logger = logging.getLogger("main")
 
-# For graceful shutdown
-shutdown_event = asyncio.Event()
+async def run(shutdown_event=None):
+    shutdown_event = shutdown_event or asyncio.Event()
+    host, port = settings()
+    servers = [uvicorn.Server(uvicorn.Config(
+        app_from_env(), host=host, port=port, access_log=False,
+        log_level=os.getenv("LOG_LEVEL", "info").lower(), timeout_graceful_shutdown=10))]
+    transcription_task = None
+    if any(os.getenv(name, "").lower() == "true" for name in (
+            "SATELLITE_CALL_TRANSCRIPTION_ENABLED", "SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED")):
+        from api import app
+        from transcription import run as transcribe
+        api_settings = api_server_settings()
+        if (api_settings["host"], api_settings["port"]) == (host, port):
+            raise ValueError("http_listener_collision")
+        if os.getenv("ARI_APP") == "voice-agent":
+            raise ValueError("transcription_ari_app_must_differ_from_voice_agents")
+        servers.append(uvicorn.Server(uvicorn.Config(
+            app, **api_settings, timeout_graceful_shutdown=10)))
+        transcription_task = asyncio.create_task(transcribe(shutdown_event), name="transcription")
 
-def signal_handler():
-    logger.info("Shutdown signal received")
-    shutdown_event.set()
-
-async def realtime_call_transcription():
-    # exit if deepgram api key is not set
-    if not os.getenv("DEEPGRAM_API_KEY"):
-        logger.error("DEEPGRAM_API_KEY is not set")
-        return
-
-    # Set up signal handlers for graceful shutdown
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, signal_handler)
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, shutdown_event.set)
+    # Only this application owns signals; neither HTTP server replaces its handlers.
+    for server in servers:
+        server.capture_signals = nullcontext
+    tasks = [asyncio.create_task(server.serve()) for server in servers]
+    stopping = asyncio.create_task(shutdown_event.wait())
+    try:
+        watched = [stopping, *tasks]
+        if transcription_task:
+            watched.append(transcription_task)
+        done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    finally:
+        shutdown_event.set()
+        for server in servers:
+            server.should_exit = True
+        stopping.cancel()
+        await asyncio.gather(*tasks, stopping,
+                             *([transcription_task] if transcription_task else []),
+                             return_exceptions=True)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(signum)
 
-    # Check for Google Cloud credentials
-    credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if credentials_path and not os.path.exists(credentials_path):
-        logger.error(f"Google Cloud credentials file not found at {credentials_path}")
-        return
 
-    # Get configuration from environment variables
-    asterisk_url = os.getenv("ASTERISK_URL", "http://localhost:8088")
-    asterisk_app = os.getenv("ARI_APP", "asterisk_dialogflow")
-    asterisk_username = os.getenv("ARI_USERNAME", "asterisk")
-    asterisk_password = os.getenv("SATELLITE_ARI_PASSWORD", "asterisk")
+def main():
+    load_dotenv(dotenv_path=".env")
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(),
+                        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    asyncio.run(run())
 
-    mqtt_url = os.getenv("MQTT_URL", "mqtt://localhost:1883")
-    mqtt_topic_prefix = os.getenv("MQTT_TOPIC_PREFIX", "asterisk-dialogflow")
-    mqtt_username = os.getenv("MQTT_USERNAME")
-    mqtt_password = os.getenv("SATELLITE_MQTT_PASSWORD")
-
-    # create an RTP server instance
-    rtp_host = os.getenv("RTP_HOST", "0.0.0.0")
-    rtp_port = int(os.getenv("RTP_PORT", "10000"))
-    rtp_swap16 = os.getenv("RTP_SWAP16", "true").lower() == "true"
-    rtp_header_size = int(os.getenv("RTP_HEADER_SIZE", "12"))
-    rtp_server = RTPServer(host=rtp_host, port=rtp_port, swap16=rtp_swap16, rtp_header_size=rtp_header_size)
-    await rtp_server.start()
-
-    # Create instances
-    mqtt_client = MQTTClient(
-        url=mqtt_url,
-        topic_prefix=mqtt_topic_prefix,
-        username=mqtt_username,
-        password=mqtt_password
-    )
-    asterisk_bridge = AsteriskBridge(
-        url=asterisk_url,
-        app=asterisk_app,
-        username=asterisk_username,
-        password=asterisk_password,
-        mqtt_client=mqtt_client,
-        rtp_server=rtp_server
-    )
-
-    async def handle_mqtt_control(topic, payload):
-        """Handle transcription control commands from middleware."""
-        if not isinstance(payload, dict):
-            return
-
-        action = payload.get("action")
-        call_id = payload.get("linkedid") or payload.get("uniqueid")
-        if not isinstance(action, str) or not isinstance(call_id, str) or not call_id:
-            return
-
-        if action == "start":
-            await asterisk_bridge.start_transcription(call_id)
-        elif action == "stop":
-            await asterisk_bridge.stop_transcription(call_id)
-
-    # Start services
-    logger.info("Starting services...")
-    mqtt_client.set_callback(handle_mqtt_control)
-    await mqtt_client.connect()
-    await mqtt_client.subscribe("transcription/control")
-    await asterisk_bridge.connect()
-    logger.info("All services started")
-
-    # Wait for shutdown signal
-    await shutdown_event.wait()
-
-    # Graceful shutdown
-    logger.info("Shutting down...")
-    # End all active Stasis sessions before disconnecting
-    await asterisk_bridge.disconnect()
-    await rtp_server.stop()
-    await mqtt_client.disconnect()
-    logger.info("Shutdown complete")
 
 if __name__ == "__main__":
-    # Start API server in a background thread
-    server_thread = threading.Thread(
-        target=uvicorn.run,
-        args=(api_app,),
-        kwargs={"host": "0.0.0.0", "port": int(os.getenv("HTTP_PORT", "8000")), "log_level": os.getenv("LOG_LEVEL", "info").lower()},
-        daemon=True
-    )
-    server_thread.start()
-    # Run the realtime call transcription pipeline
-    asyncio.run(realtime_call_transcription())
+    main()
