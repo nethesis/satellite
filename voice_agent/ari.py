@@ -238,6 +238,7 @@ class AriController:
             raise ValueError('invalid_answered_leg')
         for identifier in (caller,colleague):
             await self.subscribe_channel(identifier)
+            c.subscriptions.add(identifier)
             await self.set_variable(identifier,'VOICE_AGENT_HANDOFF_TOKEN',c.id)
             await self.set_variable(identifier,'VOICE_AGENT_HANDOFF_SELF',identifier)
         await self.set_variable(caller,'VOICE_AGENT_HANDOFF_PEER',peer['name'])
@@ -246,7 +247,20 @@ class AriController:
         await self.set_variable(colleague,'VOICE_AGENT_HANDOFF_PEER_ID',caller)
         c.native_started = True
         await self.continue_channel(colleague,{'context':'voice-agent-handoff-wait','extension':'s','priority':1})
+        c.caller_release_requested = True
         await self.continue_channel(caller,{'context':'voice-agent-handoff','extension':'s','priority':1})
+
+    async def handoff_state(self, c, colleague):
+        bridges = await self.list_bridges()
+        if any(b.get('bridge_class') == 'basic' and {c.caller.caller_id,colleague} <= set(b.get('channels',[])) for b in bridges):
+            return 'bridged'
+        caller = await self.request('GET','/channels/'+quote(c.caller.caller_id,safe=''))
+        dialplan = caller.get('dialplan') or {}
+        if (not c.caller_release_requested and dialplan.get('app_name') == 'Stasis'
+                and str(dialplan.get('app_data','')).startswith('voice-agent,')
+                and await self.get_variable(c.caller.caller_id,'VOICE_AGENT_HANDOFF_TOKEN') == c.id):
+            return 'caller_owned'
+        return 'released'
 
     async def destroy_bridge(self, bridge_id):
         try:

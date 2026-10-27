@@ -364,3 +364,62 @@ async def test_active_consultation_blocks_competing_direct_queue_transfer():
         assert await Transfer(runtime,call).transfer('queue:600',reason='different path')=={'error':'transfer_unavailable'}
         controller.continue_channel.assert_not_awaited()
     finally:await runtime.finish(call,'completed')
+
+
+
+@pytest.mark.asyncio
+async def test_correlated_native_failure_rejoins_receptionist_media():
+    runtime,storage,controller,call,client=await prepared()
+    coordinator=runtime.consultations
+    try:
+        await coordinator.start(call,'extension:203','reason')
+        c=call.consultation;c.deadline=time.monotonic()+5;c.state='phone';c.phone=Phone(runtime,coordinator,c)
+        async def failed(c,channel):
+            c.native_started=True;c.native_failure.set()
+        controller.native_handoff.side_effect=failed
+        await coordinator.connect(c)
+        assert c.state=='unavailable' and not call.terminal and not c.releasing and not c.held
+        controller.add_to_bridge.assert_awaited_once_with('caller-only-bridge',[call.caller_id])
+        assert controller.set_variable.await_args.args[:2]==(call.caller_id,'TIMEOUT(absolute)')
+        assert all(args.args[0] != call.caller_id for args in controller.hangup.await_args_list)
+    finally:await runtime.finish(call,'completed')
+
+
+
+@pytest.mark.asyncio
+async def test_partial_native_preparation_unsubscribes_only_owned_channels():
+    from voice_agent.ari import AriController
+    runtime,storage,controller,call,client=await prepared()
+    coordinator=runtime.consultations
+    ari=AriController('http://127.0.0.1:8088','test','synthetic')
+    ari.request=AsyncMock(return_value={'state':'Up','name':'Local/203@voice-agent-consult-00000001;1'})
+    ari.subscribe_channel=AsyncMock(side_effect=[None,RuntimeError('synthetic disconnect')])
+    ari.set_variable=AsyncMock()
+    try:
+        await coordinator.start(call,'extension:203','reason')
+        c=call.consultation
+        with pytest.raises(RuntimeError):await ari.native_handoff(c,'answered-colleague')
+        assert c.subscriptions=={call.caller_id} and not c.native_started
+        await coordinator.cleanup(c)
+        controller.unsubscribe_channel.assert_awaited_once_with(call.caller_id)
+    finally:await runtime.finish(call,'completed')
+
+
+
+@pytest.mark.asyncio
+async def test_failed_peer_release_recovers_only_when_caller_release_was_never_requested():
+    runtime,storage,controller,call,client=await prepared()
+    coordinator=runtime.consultations
+    try:
+        await coordinator.start(call,'extension:203','reason')
+        c=call.consultation;c.deadline=time.monotonic()+5;c.state='phone';c.phone=Phone(runtime,coordinator,c)
+        async def failed(c,channel):
+            c.native_started=True
+            raise RuntimeError('peer release acknowledgement lost')
+        controller.native_handoff.side_effect=failed
+        controller.handoff_state.return_value='caller_owned'
+        await coordinator.connect(c)
+        assert c.state=='unavailable' and not c.uncertain and not call.terminal
+        controller.handoff_state.assert_awaited_once_with(c,'answered-colleague')
+        controller.add_to_bridge.assert_awaited_once_with('caller-only-bridge',[call.caller_id])
+    finally:await runtime.finish(call,'completed')
