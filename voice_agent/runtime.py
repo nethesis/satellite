@@ -24,7 +24,7 @@ from .models import conversation_capability
 from .contract import validate_snapshot
 from .providers.webhook import verify_webhook
 from .storage import trusted_target
-from .tools import ToolRegistry, WIRE_IDS
+from .tools import ToolRegistry, WIRE_IDS, bounded_caller_name
 
 
 LOG=logging.getLogger(__name__)
@@ -67,6 +67,7 @@ class Call:
     transcript_bytes: int = 0
     webhook_diagnostics: set = field(default_factory=set)
     caller_number: str | None = field(default=None, repr=False)
+    caller_name: str = field(default='', repr=False)
     recent: object | None = field(default=None, repr=False)
     trace: object | None = field(default=None, repr=False)
     webhook_span: str | None = None
@@ -379,6 +380,7 @@ class Runtime:
             call.deadline = time.monotonic()+snapshot['max_call_duration_seconds']
             from .recent_callers import RecentCallerResolver, normalize_number
             call.caller_number = normalize_number((channel.get('caller') or {}).get('number'))
+            call.caller_name = bounded_caller_name((channel.get('caller') or {}).get('name'))
             call.recent = RecentCallerResolver(snapshot, call.caller_number, self.storage.recent_calls,
                                               (call.session_id, snapshot['agent_id'], snapshot['workflow_version']))
             # Durable correlation exists before SIP origination or webhook acceptance.
@@ -527,7 +529,7 @@ class Runtime:
             profile['prompt'] = profile.pop('instructions')
             async with trace.measure('routing_context'):
                 routing_context=await call.tools.routing_context()
-            profile['_opening_instructions']=call.tools.opening_instructions(profile['greeting'],profile['language'])
+            profile['_opening_instructions']=call.tools.opening_instructions(profile['greeting'],profile['language'],call.caller_name)
             if call.binding.get('adapter') in ('live', 'live_ws'):
                 profile['_routing_context']=routing_context
                 # Live speaks the opening itself; its delegated backend owns directory data.
