@@ -19,6 +19,17 @@ def private_url(value):
     return value
 
 
+async def bounded_json(response):
+    # read(n) may return a partial network chunk before the JSON body is complete.
+    try:
+        data = await response.content.readexactly(65537)
+    except asyncio.IncompleteReadError as error:
+        data = error.partial
+    if len(data)>65536:
+        raise ValueError('private_service_invalid')
+    return json.loads(data)
+
+
 class ConsultationClient:
     async def request(self, service, method, path, body=None):
         base = private_url(os.getenv('VOICE_AGENT_' + service + '_URL', ''))
@@ -32,10 +43,7 @@ class ConsultationClient:
                     return None
                 if response.status != 200:
                     raise ValueError('private_service_unavailable')
-                data = await response.content.read(65537)
-                if len(data)>65536:
-                    raise ValueError('private_service_invalid')
-                return json.loads(data)
+                return await bounded_json(response)
 
     async def recipient(self, extension):
         if not isinstance(extension,str) or not re.fullmatch(r'[0-9]{1,20}',extension):
@@ -127,10 +135,7 @@ class ChatConversation:
             async with session.post(base,json=payload,headers={'Authorization':'Bearer '+self.binding['api_key']}) as response:
                 if response.status!=200:
                     raise ValueError('chat_provider_unavailable')
-                data = await response.content.read(65537)
-                if len(data)>65536:
-                    raise ValueError('chat_provider_invalid')
-        result = json.loads(data)
+                result = await bounded_json(response)
         usage = result.get('usage',{})
         for source,target in [('prompt_tokens','response_input_tokens'),('completion_tokens','response_output_tokens'),('total_tokens','response_total_tokens')]:
             if type(usage.get(source)) is int and 0<=usage[source]<=10**12:
