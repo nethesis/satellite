@@ -36,7 +36,9 @@ class Consultation:
     releasing: bool = False
     uncertain: bool = False
     released: set = field(default_factory=set)
+    subscriptions: set = field(default_factory=set)
     native_started: bool = False
+    caller_release_requested: bool = False
     native_failure: asyncio.Event = field(default_factory=asyncio.Event)
     colleague_spoke: bool = False
 
@@ -357,8 +359,8 @@ class Consultations:
                 c.releasing = True
                 if not c.held:
                     await self.runtime.controller.remove_from_bridge(c.caller.bridge_id,[c.caller.caller_id])
+                    c.held = True
                 await self.runtime.controller.moh(c.caller.caller_id, False)
-                c.held = False
             if not await self.allowed(c):
                 raise ValueError('destination_denied')
             await self.runtime.controller.native_handoff(c, c.phone.channel)
@@ -377,7 +379,14 @@ class Consultations:
             self.emit(c, 'transferred')
             await self.runtime.finish(c.caller, 'transferred')
         except BaseException:
-            if not c.native_started or c.native_failure.is_set():
+            state = 'unavailable'
+            if c.native_started and not c.native_failure.is_set():
+                try:
+                    async with asyncio.timeout(2):
+                        state = await self.runtime.controller.handoff_state(c,c.phone.channel)
+                except Exception:
+                    pass
+            if not c.native_started or c.native_failure.is_set() or (state == 'caller_owned' and not c.caller_release_requested):
                 c.releasing = False
                 c.state = 'connecting'
                 await self.runtime.controller.set_variable(c.caller.caller_id,'TIMEOUT(absolute)',max(1,int(c.caller.deadline-time.monotonic())+5))
@@ -421,13 +430,12 @@ class Consultations:
                 await c.phone.close(preserve=c.transferred or c.uncertain)
             except Exception:
                 self.emit(c, 'failed')
-        if c.releasing:
-            for channel in (c.caller.caller_id, c.phone.channel if c.phone else None):
-                if channel:
-                    try:
-                        await self.runtime.controller.unsubscribe_channel(channel)
-                    except Exception:
-                        pass
+        for channel in c.subscriptions:
+            try:
+                await self.runtime.controller.unsubscribe_channel(channel)
+            except Exception:
+                pass
+        c.subscriptions.clear()
         for channel, owner in list(self.channels.items()):
             if owner is c:
                 self.channels.pop(channel, None)
