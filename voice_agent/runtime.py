@@ -286,7 +286,7 @@ class Runtime:
                 context = dialplan.get('context', '')
                 if dialplan.get('app_name') != 'Stasis' or not str(dialplan.get('app_data','')).startswith('voice-agent,'):
                     continue
-                if (context == 'voice-agent-consult'
+                if (context in ('voice-agent-consult','stasis-voice-agent')
                         and re.fullmatch(r'Local/[0-9]{1,20}@voice-agent-consult-[a-f0-9]+;1',channel.get('name',''))
                         and await self.controller.get_variable(channel['id'],'AGENT_ROLE') == 'consult'
                         and await self.controller.get_variable(channel['id'],'AGENT_SESSION_ID') in owned_sessions

@@ -305,12 +305,13 @@ async def test_uncertain_native_release_never_resumes_or_hangs_up_human_legs():
 
 
 @pytest.mark.asyncio
-async def test_restart_reconciles_only_persisted_owned_stasis_consultations():
+@pytest.mark.parametrize('context',['voice-agent-consult','stasis-voice-agent'])
+async def test_restart_reconciles_only_persisted_owned_stasis_consultations(context):
     runtime,storage,controller,_=fixtures()
     storage.consultation_ownership.return_value={'old-session'}
     storage.media_ownership.return_value={}
     def channel(id,app='Stasis',name='Local/203@voice-agent-consult-00000001;1'):
-        return {'id':id,'name':name,'dialplan':{'context':'voice-agent-consult','app_name':app,'app_data':'voice-agent,consult,old-session,attempt'}}
+        return {'id':id,'name':name,'dialplan':{'context':context,'app_name':app,'app_data':'voice-agent,consult,old-session,attempt'}}
     controller.list_channels.return_value=[channel('owned'),channel('human','Bridge'),channel('foreign'),channel('secondary',name='Local/203@voice-agent-consult-00000001;2')]
     async def variable(id,name):
         return {'AGENT_ROLE':'consult','AGENT_SESSION_ID':'old-session' if id!='foreign' else 'unowned','AGENT_CONSULT_ATTEMPT':'a'*32}.get(name)
@@ -511,3 +512,30 @@ async def test_pending_consultation_blocks_competing_agent_hangup():
         assert await Transfer(runtime,call).hangup('conversation_complete')=={'error':'hangup_unavailable'}
         assert not call.ending_by_agent
     finally:await runtime.finish(call,'completed')
+
+
+
+@pytest.mark.asyncio
+async def test_late_private_sip_origination_is_reaped_after_consultation_cancel():
+    from voice_agent.consultation_phone import PhoneConsultation
+    runtime,storage,controller,call,client=await prepared()
+    coordinator=runtime.consultations
+    entered=asyncio.Event();release=asyncio.Event();reaped=asyncio.Event()
+    call.assistant_binding={**storage.binding.return_value,'adapter':'realtime','model':call.assistant_snapshot['conversation']['model']}
+    async def originate(*args):entered.set();await release.wait()
+    controller.originate_local.side_effect=originate
+    try:
+        await coordinator.start(call,'extension:203','reason')
+        c=call.consultation;c.deadline=time.monotonic()+5;c.state='phone';c.phone=PhoneConsultation(runtime,coordinator,c)
+        task=asyncio.create_task(c.phone.start_assistant())
+        await asyncio.wait_for(entered.wait(),1)
+        private=c.phone.private
+        async def hangup(id):
+            if id==private.leg_id and release.is_set():reaped.set()
+        controller.hangup.side_effect=hangup
+        task.cancel();await asyncio.gather(task,return_exceptions=True)
+        await c.phone.close()
+        release.set();await asyncio.wait_for(reaped.wait(),1)
+        assert private.terminal and private.session_id not in runtime.calls
+    finally:
+        release.set();await runtime.finish(call,'completed')
