@@ -423,3 +423,39 @@ async def test_failed_peer_release_recovers_only_when_caller_release_was_never_r
         controller.handoff_state.assert_awaited_once_with(c,'answered-colleague')
         controller.add_to_bridge.assert_awaited_once_with('caller-only-bridge',[call.caller_id])
     finally:await runtime.finish(call,'completed')
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('decision_before_reply',[False,True])
+async def test_chat_opening_uses_internal_language_prompt_and_cannot_decide(monkeypatch,decision_before_reply):
+    from voice_agent.consultation_transport import ChatConversation
+    runtime,storage,controller,call,client=await prepared(chat=True)
+    value=publication('consultation');value['chat_model']='synthetic-text-model';value['conversation']['language']='fr'
+    value['conversation']['instructions']='Configured private assistant prompt.'
+    captured=[]
+    output={'role':'assistant','content':'Bonjour. Voulez-vous accepter cet appel ?'}
+    if decision_before_reply:output['tool_calls']=[{'function':{'name':'nv_consultation_decide_v1','arguments':'{"decision":"accept","text":""}'}}]
+    class Response:
+        status=200
+        content=SimpleNamespace(read=AsyncMock(return_value=json.dumps({'choices':[{'message':output}],'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15}}).encode()))
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+    class Session:
+        def __init__(self,**kwargs):pass
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        def post(self,url,**kwargs):captured.append(kwargs['json']);return Response()
+    monkeypatch.setattr('voice_agent.consultation_transport.aiohttp.ClientSession',Session)
+    try:
+        await runtime.consultations.start(call,'extension:203','A concise reason')
+        c=call.consultation;c.deadline=time.monotonic()+5
+        conversation=ChatConversation(value,{'provider':'openai','api_key':'synthetic'},c)
+        if decision_before_reply:
+            with pytest.raises(ValueError,match='invalid_chat_opening'):await conversation.opening()
+        else:assert await conversation.opening()==output['content']
+        assert captured[0]['model']=='synthetic-text-model' and 'tools' not in captured[0]
+        assert 'Configured private assistant prompt.' in captured[0]['messages'][0]['content']
+        assert 'configured language fr' in captured[0]['messages'][0]['content']
+        assert c.responses.empty() and c.state=='pending'
+    finally:await runtime.finish(call,'completed')

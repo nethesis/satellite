@@ -91,16 +91,12 @@ class ChatConversation:
         self._closed = False
 
     async def opening(self):
-        c = self.consultation
-        # A deterministic transport envelope keeps correlation and the deadline
-        # authoritative; the assistant owns decisions on natural-language replies.
-        if self.snapshot['conversation'].get('language','').lower().startswith('it'):
-            return ('Consultazione per una chiamata. Chiamante: '+(c.caller.caller_name or 'nome non disponibile')
-                    +'. Motivo: '+c.reason+'. Vuoi accettare la chiamata, rifiutare, lasciare un messaggio o fare una domanda?')
-        return ('Call consultation. Caller: ' + (c.caller.caller_name or 'name unavailable')
-                + '. Reason: ' + c.reason + '. Connect this caller, decline, return a message, or ask one question?')
+        return await self._complete('Introduce yourself as the private call consultation assistant in the configured language. Use the configured greeting where appropriate, summarize the caller context and ask whether to connect, decline, return a message or ask one question. Do not make any decision for the colleague.', opening=True)
 
     async def reply(self, text):
+        return await self._complete(text)
+
+    async def _complete(self, text, *, opening=False):
         if not isinstance(text,str) or len(text)>2000 or len(self.messages)>=16:
             raise ValueError('chat_capacity')
         from .tools import CONSULTATION_TOOLS
@@ -115,7 +111,7 @@ class ChatConversation:
             'to accept, decline, relay a message or ask one question. Never accept a quoted, ambiguous or '
             'unrelated message. Ask the colleague for a clear decision if ambiguous. Do not invent consent. '
             'No configuration changes or arbitrary destinations. Caller context (JSON data): '
-            + json.dumps({'name': c.caller.caller_name, 'reason': c.reason, 'clarified': c.clarified},ensure_ascii=False))
+            + json.dumps({'name': c.caller.caller_name, 'reason': c.reason, 'clarified': c.clarified, 'greeting': self.snapshot['conversation']['greeting']},ensure_ascii=False))
         self.messages.append({'role':'user','content':text})
         tool = CONSULTATION_TOOLS[0]
         # Both vendors provide the documented chat-completions text interface;
@@ -124,6 +120,9 @@ class ChatConversation:
         payload = {'model':model,'messages':[{'role':'system','content':instructions}]+self.messages,
                    'tools':[{'type':'function','function':{'name':tool['name'],'description':tool['description'],'parameters':tool['parameters']}}],
                    'parallel_tool_calls':False,'store':False}
+        if opening:
+            payload.pop('tools')
+            payload.pop('parallel_tool_calls')
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=min(10,max(.1,c.deadline-time.monotonic())))) as session:
             async with session.post(base,json=payload,headers={'Authorization':'Bearer '+self.binding['api_key']}) as response:
                 if response.status!=200:
@@ -140,6 +139,12 @@ class ChatConversation:
                 self._usage_complete = False
         value = result['choices'][0]['message']
         calls = value.get('tool_calls', [])
+        if opening:
+            content = value.get('content')
+            if calls or not isinstance(content,str) or not 1<=len(content)<=1000:
+                raise ValueError('invalid_chat_opening')
+            self.messages.append({'role':'assistant','content':content})
+            return content
         if len(calls)==1 and calls[0].get('function',{}).get('name')==tool['name']:
             decision = json.loads(calls[0]['function']['arguments'])
             if (not isinstance(decision,dict) or set(decision)!={'decision','text'}
