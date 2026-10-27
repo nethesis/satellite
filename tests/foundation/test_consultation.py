@@ -6,7 +6,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -466,13 +466,48 @@ async def test_chat_opening_uses_internal_language_prompt_and_cannot_decide(monk
 async def test_private_json_waits_for_split_network_body_and_bounds_response_size():
     import aiohttp
     from voice_agent.consultation_transport import bounded_json
-    stream=aiohttp.StreamReader(SimpleNamespace(_reading_paused=False),limit=65537)
+    stream=aiohttp.StreamReader(MagicMock(connected=True,_reading_paused=False),limit=65537)
     stream.feed_data(b'{"version":')
     task=asyncio.create_task(bounded_json(SimpleNamespace(content=stream)))
     await asyncio.sleep(0)
     assert not task.done()
     stream.feed_data(b'1}');stream.feed_eof()
     assert await task=={'version':1}
-    oversized=aiohttp.StreamReader(SimpleNamespace(_reading_paused=False),limit=65537)
+    oversized=aiohttp.StreamReader(MagicMock(connected=True,_reading_paused=False),limit=65537)
     oversized.feed_data(b'x'*65537);oversized.feed_eof()
     with pytest.raises(ValueError):await bounded_json(SimpleNamespace(content=oversized))
+
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_native_release_never_starts_competing_fallback():
+    runtime,storage,controller,call,client=await prepared()
+    coordinator=runtime.consultations
+    coordinator.phone_factory=Phone;Phone.decision='accept'
+    entered=asyncio.Event()
+    async def handoff(c,channel):
+        c.native_started=True;c.caller_release_requested=True;entered.set()
+        await asyncio.Event().wait()
+    controller.native_handoff.side_effect=handoff
+    controller.handoff_state.return_value='bridged'
+    try:
+        await coordinator.start(call,'extension:203','reason')
+        c=call.consultation;await coordinator.begin(call)
+        await asyncio.wait_for(entered.wait(),1)
+        await runtime.finish(call,'interrupted','runtime_stopped',fallback=True)
+        assert c.uncertain and call.terminal and not coordinator.recipients
+        controller.continue_channel.assert_not_awaited()
+        assert all(args.args[0] not in (call.caller_id,c.phone.channel) for args in controller.hangup.await_args_list)
+    finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_pending_consultation_blocks_competing_agent_hangup():
+    from voice_agent.runtime import Transfer
+    runtime,storage,controller,call,client=await prepared()
+    call.snapshot['tool_bindings'][3]['enabled']=True
+    try:
+        await runtime.consultations.start(call,'extension:203','reason')
+        assert await Transfer(runtime,call).hangup('conversation_complete')=={'error':'hangup_unavailable'}
+        assert not call.ending_by_agent
+    finally:await runtime.finish(call,'completed')

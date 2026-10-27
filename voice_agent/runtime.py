@@ -99,7 +99,7 @@ class Transfer:
         if reason not in ('caller_request', 'conversation_complete') or type(timeout) is not int or not 1 <= timeout <= 10:
             return {'error': 'invalid_arguments'}
         async with call.lock:
-            if (call.terminal or call.transfer_target or call.ending_by_agent or not call.media_connected
+            if (call.terminal or call.transfer_target or call.consultation or call.ending_by_agent or not call.media_connected
                     or self.runtime.calls.get(call.session_id) is not call):
                 return {'error': 'hangup_unavailable'}
             call.ending_by_agent = True
@@ -811,8 +811,16 @@ class Runtime:
             call.terminal = True
             if call.ending_by_agent:
                 outcome, fallback = 'ended_by_agent', False
-        if call.consultation:
+        consultation = call.consultation
+        if consultation:
             await self.consultations.cancel(call)
+            # A concurrent shutdown/provider failure may have begun before the
+            # consultation committed to native ownership. Never compete with it.
+            if consultation.transferred or consultation.uncertain or (consultation.releasing and consultation.native_started):
+                fallback = False
+                call.caller_left = True
+                outcome = 'transferred' if consultation.transferred else 'failed'
+                error = None if consultation.transferred else 'transfer_uncertain'
         if call.private_consultation:
             await self.consultations.private_ended(call.private_consultation, call)
         if call.hangup_task and call.hangup_task is not asyncio.current_task():
