@@ -70,7 +70,7 @@ class ConsultationClient:
         identifier = secrets.token_hex(16)
         payload = {'id': identifier, 'recipient': c.recipient['recipient_id'],
                    'mainextension': c.recipient['mainextension'], 'reference': c.reference,
-                   'body': '#' + c.reference + ' — ' + body.encode('utf-8')[:1500].decode('utf-8',errors='ignore') + '\nReply with #' + c.reference + ' and your decision. Expires at ' + expiry.strftime('%H:%M:%S UTC') + '.',
+                   'body': '#' + c.reference + ' — ' + body.encode('utf-8')[:1500].decode('utf-8',errors='ignore') + '\nStart the first line of your reply with #' + c.reference + ' and your decision. Expires at ' + expiry.strftime('%H:%M:%S UTC') + '.',
                    'expires_at': expiry.isoformat()}
         await self.request('CHAT','POST','/v1/consultations/messages',payload)
         return identifier
