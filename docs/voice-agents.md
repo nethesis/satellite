@@ -32,6 +32,18 @@ acknowledgement and Stasis release. A tool acknowledgement alone is never succes
 Compact media/provider channel identities fit native CDR/CEL limits; session/run
 UUIDs remain independent. Hangup is opt-in, bounded and rechecks caller ownership.
 
+The opening receives the PBX-resolved caller name from the admitted ARI channel,
+bounded to 256 UTF-8 bytes with control characters removed. The model is asked to
+use a confidently identified first name and otherwise greet neutrally, including
+for anonymous, numeric, company-only or ambiguous names. This display data grants
+no permissions and does not change the configured welcome or language policy.
+It is call-local; it is not added to publications or monitoring metadata. Actual
+pronunciation and name selection still require human listening acceptance.
+
+Attended transfer is not enabled. Its service-authenticated presence/chat and
+native handoff integration gates must pass before introducing a new publication
+contract or consultation flow. Existing v8 publications and tools-v5 are unchanged.
+
 Configuration and monitoring use separate least-privilege MariaDB accounts. Runs,
 format-2 metadata/events and optional encrypted debug transcripts are stored in
 `asteriskcdrdb`. Durable bounded outboxes preserve idempotency across retries and
