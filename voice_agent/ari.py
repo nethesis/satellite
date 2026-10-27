@@ -213,15 +213,40 @@ class AriController:
             raise ValueError('invalid audio direction')
         await self.request('POST' if enabled else 'DELETE', f"/channels/{quote(channel_id, safe='')}/mute", params={'direction':direction})
 
-    async def originate_consult(self, session_id, attempt_id, channel_id, extension, seconds):
+    async def originate_consult(self, session_id, attempt_id, channel_id, extension, seconds, *, originator=None, caller_id=None):
         validate_channel_id(channel_id)
         if not str(extension).isdigit():
             raise ValueError("invalid consultation extension")
-        return await self.request("POST", "/channels", params={
-            "endpoint": f"Local/{extension}@from-internal/n", "app": self.app,
+        params={
+            "endpoint": f"Local/{extension}@voice-agent-consult/n", "app": self.app,
             "appArgs": f"consult,{session_id},{attempt_id}", "channelId": channel_id,
-            "timeout": seconds}, json_body={"variables": {"__AGENT_ROLE": "consult",
+            "timeout": seconds}
+        if originator:
+            params['originator']=originator
+        if caller_id:
+            params['callerId']=caller_id
+        return await self.request("POST", "/channels", params=params, json_body={"variables": {"__AGENT_ROLE": "consult",
                 "__AGENT_SESSION_ID": session_id, "__AGENT_CONSULT_ATTEMPT": attempt_id}})
+
+    async def native_handoff(self, consultation, colleague):
+        c = consultation
+        caller = c.caller.caller_id
+        if not re.fullmatch(r'[a-f0-9]{32}', c.id):
+            raise ValueError('invalid_attempt')
+        peer = await self.request('GET', '/channels/' + quote(colleague, safe=''))
+        if peer.get('state') != 'Up' or not re.fullmatch(r'Local/[0-9]{1,20}@voice-agent-consult-[a-f0-9]+;1',peer.get('name','')):
+            raise ValueError('invalid_answered_leg')
+        for identifier in (caller,colleague):
+            await self.subscribe_channel(identifier)
+            await self.set_variable(identifier,'VOICE_AGENT_HANDOFF_TOKEN',c.id)
+            await self.set_variable(identifier,'VOICE_AGENT_HANDOFF_SELF',identifier)
+        await self.set_variable(caller,'VOICE_AGENT_HANDOFF_PEER',peer['name'])
+        await self.set_variable(caller,'AGENT_SESSION_ID',c.caller.session_id)
+        await self.set_variable(caller,'VOICE_AGENT_HANDOFF_PEER_ID',colleague)
+        await self.set_variable(colleague,'VOICE_AGENT_HANDOFF_PEER_ID',caller)
+        c.native_started = True
+        await self.continue_channel(colleague,{'context':'voice-agent-handoff-wait','extension':'s','priority':1})
+        await self.continue_channel(caller,{'context':'voice-agent-handoff','extension':'s','priority':1})
 
     async def destroy_bridge(self, bridge_id):
         try:
