@@ -126,13 +126,16 @@ class Storage:
                 cursor.execute('SELECT tool_id,tool_version,manifest_json FROM asterisk.voice_agent_runtime_tools')
                 return [json.loads(row['manifest_json']) for row in cursor.fetchall()]
 
-    def admit(self, call):
+    def admit(self, call, *, voice=True):
         from .telemetry import retention_days
         with database('monitor') as db:
             with db.cursor() as cursor:
                 cursor.execute("INSERT INTO asteriskcdrdb.voice_agent_runs (run_id,agent_id,workflow_version,linkedid,started_at,retention_until,monitoring_version,provider,adapter,model,trace_status,deadline_at) VALUES (%s,%s,%s,%s,%s,DATE_ADD(%s,INTERVAL %s DAY),2,%s,%s,%s,'recording',DATE_ADD(NOW(),INTERVAL %s SECOND))", (call.run_id, call.snapshot['agent_id'], call.snapshot['workflow_version'], call.linkedid, call.started_at.replace(tzinfo=None), call.started_at.replace(tzinfo=None), retention_days(), call.binding['provider'], call.binding.get('adapter','realtime'), call.binding.get('model'), call.snapshot['max_call_duration_seconds']+60))
-                cursor.execute('INSERT INTO asteriskcdrdb.voice_agent_pending_calls (session_id,run_id,provider,binding_id,agent_id,provider_leg_id,expires_at) VALUES (%s,%s,%s,%s,%s,%s,DATE_ADD(NOW(),INTERVAL 30 SECOND))',
-                    (call.session_id, call.run_id, call.binding['provider'], call.binding['binding_id'], call.snapshot['agent_id'], call.leg_id))
+                if call.parent_run_id:
+                    cursor.execute('UPDATE asteriskcdrdb.voice_agent_runs SET parent_run_id=%s WHERE run_id=%s', (call.parent_run_id, call.run_id))
+                if voice:
+                    cursor.execute('INSERT INTO asteriskcdrdb.voice_agent_pending_calls (session_id,run_id,provider,binding_id,agent_id,provider_leg_id,expires_at) VALUES (%s,%s,%s,%s,%s,%s,DATE_ADD(NOW(),INTERVAL 30 SECOND))',
+                        (call.session_id, call.run_id, call.binding['provider'], call.binding['binding_id'], call.snapshot['agent_id'], call.leg_id))
 
     def accept(self, call, provider_call_id):
         with database('monitor') as db:
@@ -147,6 +150,12 @@ class Storage:
             with db.cursor() as cursor:
                 cursor.execute("SELECT p.provider_leg_id,p.session_id FROM asteriskcdrdb.voice_agent_pending_calls p JOIN asteriskcdrdb.voice_agent_runs r ON r.run_id=p.run_id WHERE r.adapter='live_ws' AND r.started_at>NOW()-INTERVAL 1 DAY ORDER BY r.started_at DESC LIMIT 1024")
                 return dict(cursor.fetchall())
+
+    def consultation_ownership(self):
+        with database('monitor') as db:
+            with db.cursor() as cursor:
+                cursor.execute("SELECT session_id FROM asteriskcdrdb.voice_agent_pending_calls p JOIN asteriskcdrdb.voice_agent_runs r ON r.run_id=p.run_id WHERE r.started_at>NOW()-INTERVAL 1 DAY ORDER BY r.started_at DESC LIMIT 1024")
+                return {row[0] for row in cursor.fetchall()}
 
     def event(self, event):
         from .monitor_store import record_event

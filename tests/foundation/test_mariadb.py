@@ -47,7 +47,8 @@ def test_published_binding_secretbox_matches_php_and_directory_is_read_only(monk
     assert binding['trunk_name'].startswith('VoiceAgentTrunk_')
     assert storage.targets() == [{'id':'extension:203','name':'Test extension'}]
     from voice_agent.tools import DEFINITIONS
-    assert sorted(storage.tools(),key=lambda row:(row['id'],row['version']))==sorted(DEFINITIONS,key=lambda row:(row['id'],row['version']))
+    from voice_agent.tools import SUPPORTED
+    assert sorted(storage.tools(),key=lambda row:(row['id'],row['version']))==sorted(SUPPORTED.values(),key=lambda row:(row['id'],row['version']))
     repository = PublishedRepository(lambda: mysql.connector.connect(
         host='127.0.0.1',port=int(os.environ['M0_TEST_PORT']),user='m0_reader',password=''))
     snapshot=repository.load('receptionist')

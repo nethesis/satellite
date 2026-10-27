@@ -73,11 +73,21 @@ class Call:
     webhook_span: str | None = None
     media: object | None = field(default=None, repr=False)
     audio_bridge: object | None = field(default=None, repr=False)
+    assistant_snapshot: dict | None = field(default=None, repr=False)
+    assistant_binding: dict | None = field(default=None, repr=False)
+    consultation: object | None = field(default=None, repr=False)
+    private_consultation: object | None = field(default=None, repr=False)
+    parent_run_id: str | None = None
+    consulted_recipients: set = field(default_factory=set, repr=False)
+    text_only: bool = False
 
 
 class Transfer:
     def __init__(self, runtime, call):
         self.runtime, self.call = runtime, call
+
+    async def consultation_answer(self, answer):
+        return await self.runtime.consultations.answer(self.call, answer)
 
     async def hangup(self, reason):
         call = self.call
@@ -98,8 +108,22 @@ class Transfer:
             call.hangup_task = self.runtime.spawn(self.runtime.end_after_playback(call))
         return {'outcome': 'ending'}
 
-    async def transfer(self, destination_id, *, candidate_ref=None):
+    async def authorized(self, destination_id, candidate_ref=None):
+        from .routing import RoutingPolicy
+        rows = await asyncio.wait_for(asyncio.to_thread(self.runtime.storage.routing_targets), 5)
+        policy = RoutingPolicy(self.call.snapshot)
+        if destination_id not in {r['id'] for r in rows if r.get('available', True)}:
+            return False
+        if candidate_ref is not None:
+            return bool(self.call.recent and policy.permits_recent(destination_id)
+                and self.call.recent.scope == (self.call.session_id, self.call.snapshot['agent_id'], self.call.snapshot['workflow_version'])
+                and self.call.recent.resolve(candidate_ref, rows) == destination_id)
+        return policy.permits(destination_id)
+
+    async def transfer(self, destination_id, *, candidate_ref=None, reason=None):
         call = self.call
+        if destination_id.startswith('extension:') and call.snapshot.get('consultation', {}).get('mode') == 'attended':
+            return await self.runtime.consultations.start(call, destination_id, reason, candidate_ref)
         tool_id = 'pbx.transfer'
         target = trusted_target(destination_id, allow_pbx=True)
         def permitted(rows):
@@ -111,7 +135,7 @@ class Transfer:
                             and call.recent.resolve(candidate_ref, rows) == destination_id)
             return policy.permits(destination_id) and destination_id in {r['id'] for r in rows if r.get('available', True)}
         async with call.lock:
-            if call.terminal or call.transfer_target or call.ending_by_agent:
+            if call.terminal or call.transfer_target or call.ending_by_agent or call.consultation:
                 return {'error': 'transfer_unavailable'}
             from .routing import RoutingPolicy
             rows = await asyncio.wait_for(asyncio.to_thread(self.runtime.storage.routing_targets), timeout=5)
@@ -172,6 +196,8 @@ class Runtime:
         self.controller.on_event = self.event
         self.controller.on_disconnect = self.disconnected
         self.stopping = False
+        from .consultation import Consultations
+        self.consultations = Consultations(self)
 
     def trace(self, call):
         if call.trace is None:
@@ -247,6 +273,7 @@ class Runtime:
             # A media channel has no voice-agent-provider dialplan context.
             # Match persisted ownership and trusted channel markers instead.
             owned_media = await asyncio.to_thread(self.storage.media_ownership)
+            owned_sessions = await asyncio.to_thread(self.storage.consultation_ownership)
             # Only recover channels belonging to this app and these generated contexts.
             for channel in await self.controller.list_channels():
                 session = owned_media.get(channel['id']) if isinstance(owned_media, dict) else None
@@ -258,6 +285,16 @@ class Runtime:
                 dialplan = channel.get('dialplan') or {}
                 context = dialplan.get('context', '')
                 if dialplan.get('app_name') != 'Stasis' or not str(dialplan.get('app_data','')).startswith('voice-agent,'):
+                    continue
+                if (context == 'voice-agent-consult'
+                        and re.fullmatch(r'Local/[0-9]{1,20}@voice-agent-consult-[a-f0-9]+;1',channel.get('name',''))
+                        and await self.controller.get_variable(channel['id'],'AGENT_ROLE') == 'consult'
+                        and await self.controller.get_variable(channel['id'],'AGENT_SESSION_ID') in owned_sessions
+                        and re.fullmatch(r'[a-f0-9]{32}',await self.controller.get_variable(channel['id'],'AGENT_CONSULT_ATTEMPT') or '')
+                        and channel['id'] not in self.consultations.channels):
+                    await self.controller.hangup(channel['id'])
+                    continue
+                if context in ('voice-agent-consult','voice-agent-handoff','voice-agent-handoff-wait'):
                     continue
                 if context == 'voice-agent-provider':
                     await self.controller.hangup(channel['id'])
@@ -276,6 +313,8 @@ class Runtime:
             return
         channel = event.get('channel') or {}
         channel_id = channel.get('id')
+        if await self.consultations.event(event):
+            return
         if kind == 'StasisStart':
             args = event.get('args') or []
             if not isinstance(args,list) or not all(isinstance(value,str) for value in args):
@@ -349,6 +388,8 @@ class Runtime:
                 raise ValueError('invalid_entrypoint')
             snapshot = await asyncio.wait_for(asyncio.to_thread(self.storage.snapshot, agent_id), timeout=5)
             snapshot = validate_snapshot(snapshot)
+            if snapshot.get('role') == 'consultation':
+                raise ValueError('internal_agent_not_public')
             observations.append(('snapshot', origin, time.monotonic()))
             if len(self.monitoring.pending) >= MAX_PENDING - RESERVED:
                 raise ValueError('monitoring_capacity_exceeded')
@@ -381,6 +422,21 @@ class Runtime:
             from .recent_callers import RecentCallerResolver, normalize_number
             call.caller_number = normalize_number((channel.get('caller') or {}).get('number'))
             call.caller_name = bounded_caller_name((channel.get('caller') or {}).get('name'))
+            if snapshot.get('consultation', {}).get('mode') == 'attended':
+                try:
+                    assistant = validate_snapshot(await asyncio.wait_for(asyncio.to_thread(self.storage.snapshot, snapshot['consultation']['assistant_id']), 5))
+                    if assistant.get('role') != 'consultation':
+                        raise ValueError('invalid_internal_assistant')
+                    internal_binding = await asyncio.wait_for(asyncio.to_thread(self.storage.binding, assistant['provider_binding_id']), 5)
+                    if internal_binding['provider'] != assistant['provider']:
+                        raise ValueError('provider_mismatch')
+                    capability = conversation_capability(assistant['provider'], assistant['conversation'])
+                    call.assistant_snapshot = assistant
+                    call.assistant_binding = {**internal_binding, 'model': assistant['conversation']['model'], 'adapter': 'live_ws' if capability['adapter'] == 'live' else capability['adapter']}
+                except Exception:
+                    # A missing consultation component must not reject a working
+                    # Receptionist session or silently authorize direct transfer.
+                    call.assistant_snapshot = call.assistant_binding = None
             call.recent = RecentCallerResolver(snapshot, call.caller_number, self.storage.recent_calls,
                                               (call.session_id, snapshot['agent_id'], snapshot['workflow_version']))
             # Durable correlation exists before SIP origination or webhook acceptance.
@@ -604,6 +660,8 @@ class Runtime:
                 if call.terminal:
                     break
                 self.observe(call, event)
+                if event.get('type') == 'input_speech' and call.private_consultation:
+                    call.private_consultation.colleague_spoke = True
                 if event.get('type') == 'closed':
                     await self.finish(call, 'fallback', 'provider_disconnected', fallback=True)
                     break
@@ -719,7 +777,17 @@ class Runtime:
                     await asyncio.shield(call.hangup_task)
                 else:
                     await call.adapter.send_result(event['invocation_id'],result)
-                    await call.adapter.respond(response_id=event.get('response_id'))
+                    if result.get('outcome') == 'consulting':
+                        try:
+                            await asyncio.wait_for(call.adapter.consultation_say('Briefly tell the caller that you will check with the requested colleague. Do not claim acceptance or connection.'), 10)
+                            await self.consultations.begin(call)
+                        except Exception:
+                            c = call.consultation
+                            if c:
+                                await self.consultations.resolve(c,'failed',speak=False)
+                                await self.consultations.cleanup(c)
+                    else:
+                        await call.adapter.respond(response_id=event.get('response_id'))
         except asyncio.CancelledError:
             trace.end(span, 'cancelled', error='cancelled')
             raise
@@ -735,12 +803,18 @@ class Runtime:
         await self.finish(call, 'ended_by_agent', fallback=False)
 
     async def finish(self, call, outcome, error=None, fallback=False):
+        if call.text_only:
+            fallback = False
         async with call.lock:
             if call.terminal:
                 return
             call.terminal = True
             if call.ending_by_agent:
                 outcome, fallback = 'ended_by_agent', False
+        if call.consultation:
+            await self.consultations.cancel(call)
+        if call.private_consultation:
+            await self.consultations.private_ended(call.private_consultation, call)
         if call.hangup_task and call.hangup_task is not asyncio.current_task():
             call.hangup_task.cancel()
             await asyncio.gather(call.hangup_task, return_exceptions=True)
@@ -799,10 +873,11 @@ class Runtime:
                     except Exception:
                         pass
         trace.end(fallback_span, 'failed' if fallback_failed else 'completed',error='fallback_failed' if fallback_failed else None)
-        try:
-            await self.controller.hangup(call.leg_id)
-        except Exception:
-            cleanup_failed = True
+        if not call.text_only:
+            try:
+                await self.controller.hangup(call.leg_id)
+            except Exception:
+                cleanup_failed = True
         if call.media:
             try:
                 await call.media.close()

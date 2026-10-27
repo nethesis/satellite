@@ -378,3 +378,20 @@ Voice agents support fresh v8 installations with matching NethVoice/Satellite
 images. Configuration is PHP/MariaDB-owned and activation happens on publication.
 See [architecture, installation and operations](docs/voice-agents.md) and
 [validation and acceptance gaps](docs/voice-agents-validation.md).
+
+### Attended transfers
+
+Publication v9 adds opt-in consultations for people; v8/tools-v5 remain immutable.
+The caller and selected internal assistant versions are pinned at admission.
+Phone consultations use an isolated provider/media session; chat uses the selected
+text model and a scoped loopback gateway. One 60-second budget covers phone, chat,
+one clarification and connection. Success requires an exact native basic bridge
+and both Stasis releases; uncertain release never starts competing fallback.
+
+Provision `VOICE_AGENT_RECIPIENT_URL`, `VOICE_AGENT_RECIPIENT_TOKEN`,
+`VOICE_AGENT_CHAT_URL` and `VOICE_AGENT_CHAT_TOKEN` through the companion NS8 module.
+Both URLs must be bare `http://127.0.0.1:<port>` addresses. No staff JWT or broad
+chat component key is accepted. Missing services make consultations unavailable
+while preserving the caller's working conversation. See the companion
+[NethVoice guide](https://github.com/nethesis/ns8-nethvoice/blob/voice_agents_attended_transfer/docs/voice-agents-attended-transfer.md)
+for setup and live acceptance gates.

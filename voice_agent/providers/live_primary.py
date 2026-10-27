@@ -76,6 +76,8 @@ class OpenAILiveWebSocketSession(OpenAILiveAdapter):
             except ValueError:
                 raise ProviderError('provider_live_error') from None
             self.audio.append(data)
+            self._consultation_audio_sequence = getattr(self, '_consultation_audio_sequence', 0) + 1
+            self._consultation_audio_at = time.monotonic()
             if not self._output_observed:
                 self._output_observed = True
                 await self._emit({'type': 'audio_started'})
@@ -102,6 +104,16 @@ class OpenAILiveWebSocketSession(OpenAILiveAdapter):
 
     async def send_audio(self, frame):
         if self._audio_enabled:
+            # Content-free input activity uses the same PCMU signal threshold
+            # as media diagnostics; it is not identity/intent recognition.
+            signal = bool(frame) and sum(PCMU_POWER[v] for v in frame) >= len(frame)*200**2
+            if signal:
+                if not getattr(self,'_consultation_input_active',False):
+                    await self._emit({'type':'input_speech'})
+                self._consultation_input_active = True
+                self._consultation_input_at = time.monotonic()
+            elif time.monotonic()-getattr(self,'_consultation_input_at',0)>.5:
+                self._consultation_input_active = False
             await self._send({'type': 'session.input_audio.append',
                               'audio': base64.b64encode(frame).decode()})
 
