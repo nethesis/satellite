@@ -438,7 +438,7 @@ async def test_chat_opening_uses_internal_language_prompt_and_cannot_decide(monk
     if decision_before_reply:output['tool_calls']=[{'function':{'name':'nv_consultation_decide_v1','arguments':'{"decision":"accept","text":""}'}}]
     class Response:
         status=200
-        content=SimpleNamespace(read=AsyncMock(return_value=json.dumps({'choices':[{'message':output}],'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15}}).encode()))
+        content=SimpleNamespace(readexactly=AsyncMock(side_effect=asyncio.IncompleteReadError(json.dumps({'choices':[{'message':output}],'usage':{'prompt_tokens':10,'completion_tokens':5,'total_tokens':15}}).encode(),65537)))
         async def __aenter__(self):return self
         async def __aexit__(self,*args):pass
     class Session:
@@ -459,3 +459,20 @@ async def test_chat_opening_uses_internal_language_prompt_and_cannot_decide(monk
         assert 'configured language fr' in captured[0]['messages'][0]['content']
         assert c.responses.empty() and c.state=='pending'
     finally:await runtime.finish(call,'completed')
+
+
+
+@pytest.mark.asyncio
+async def test_private_json_waits_for_split_network_body_and_bounds_response_size():
+    import aiohttp
+    from voice_agent.consultation_transport import bounded_json
+    stream=aiohttp.StreamReader(SimpleNamespace(_reading_paused=False),limit=65537)
+    stream.feed_data(b'{"version":')
+    task=asyncio.create_task(bounded_json(SimpleNamespace(content=stream)))
+    await asyncio.sleep(0)
+    assert not task.done()
+    stream.feed_data(b'1}');stream.feed_eof()
+    assert await task=={'version':1}
+    oversized=aiohttp.StreamReader(SimpleNamespace(_reading_paused=False),limit=65537)
+    oversized.feed_data(b'x'*65537);oversized.feed_eof()
+    with pytest.raises(ValueError):await bounded_json(SimpleNamespace(content=oversized))
