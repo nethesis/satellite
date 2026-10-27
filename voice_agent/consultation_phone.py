@@ -120,10 +120,11 @@ class PhoneConsultation:
         user = binding.get('openai_project_id') if binding['provider']=='openai' else binding.get('grok_phone_number')
         if not isinstance(user,str) or not re.fullmatch(r'proj_[A-Za-z0-9_-]+|\+[1-9][0-9]{1,14}',user):
             raise ValueError('invalid_provider_user')
-        await self.runtime.controller.originate_local(call.session_id,call.leg_id,{
+        await self.runtime.owned_resource(call, self.runtime.controller.originate_local(call.session_id,call.leg_id,{
             '__AGENT_SESSION_ID':call.session_id,'__AGENT_PROVIDER_LEG_ID':call.leg_id,
             '__VOICE_AGENT_ID':snapshot['agent_id'],'__AGENT_PROVIDER_HOST':'sip.api.openai.com' if binding['provider']=='openai' else 'sip.voice.x.ai',
-            '__AGENT_PROVIDER_USER':user,'__AGENT_PROVIDER_TRUNK':binding['trunk_name']})
+            '__AGENT_PROVIDER_USER':user,'__AGENT_PROVIDER_TRUNK':binding['trunk_name']}),
+            lambda:self.runtime.controller.hangup(call.leg_id))
 
     async def answer(self, answer):
         if not self.private or not self.private.adapter or self.private.terminal:
