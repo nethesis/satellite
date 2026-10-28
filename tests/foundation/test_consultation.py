@@ -34,7 +34,7 @@ def publication(role='public'):
 
 def recipient(**changes):
     return dict(version=1, recipient_id='alice', mainextension='203',
-        effective_presence='online', device_state='0', chat_allowed=True,
+        effective_presence='online', device_state='0', chat_allowed=True, voicemail_enabled=False,
         observed_at=datetime.now(timezone.utc).isoformat(), **changes)
 
 
@@ -680,3 +680,155 @@ async def test_private_opening_does_not_invent_unknown_caller_identity():
         assert tools.context()['caller_name']==''
         assert 'Never invent a missing caller name or reason' in tools.opening_instructions('Welcome','it')
     finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('decision',['decline','reply'])
+async def test_private_final_message_is_relayed_and_phone_closed_before_caller_speech(decision):
+    runtime,storage,controller,call,client=await prepared()
+    try:
+        await runtime.consultations.start(call,'extension:203','Open ticket')
+        c=call.consultation;c.state='phone';c.deadline=time.monotonic()+60;c.colleague_spoke=True
+        c.phone=Phone(runtime,runtime.consultations,c)
+        tools=PrivateTools(runtime.consultations,c)
+        message='Please ask Bob to send me an email about the ticket.'
+        assert (await tools.invoke('decision-1','nv_consultation_decide_v1',{'decision':decision,'text':message}))['outcome']=='decision_submitted'
+        async def spoken(instruction,data):
+            c.phone.close.assert_awaited()
+            assert data['message']==message
+            assert data['outcome']==('declined' if decision=='decline' else 'replied')
+            assert 'do not replace it with a generic unavailable response' in instruction
+        call.adapter.consultation_say.side_effect=spoken
+        assert await runtime.consultations.decision(c,await c.responses.get())
+        assert c.state==('declined' if decision=='decline' else 'replied')
+        assert not call.terminal
+        assert 'hangs up this private phone call' in tools.advertised()[0]['description']
+    finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_private_hangup_precedes_slow_provider_finalization():
+    from voice_agent.consultation_phone import PhoneConsultation
+    runtime,storage,controller,call,client=await prepared()
+    release=asyncio.Event()
+    try:
+        await runtime.consultations.start(call,'extension:203','Open ticket')
+        c=call.consultation;phone=PhoneConsultation(runtime,runtime.consultations,c)
+        async def detach():await release.wait()
+        phone.detach=detach
+        closing=asyncio.create_task(phone.close())
+        for _ in range(5):await asyncio.sleep(0)
+        controller.hangup.assert_awaited_once_with(phone.channel)
+        assert not closing.done()
+        release.set();await closing
+        controller.hangup.assert_awaited_once_with(phone.channel)
+        assert call.caller_id!=phone.channel
+    finally:
+        release.set()
+        await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('presence,enabled,offered',[('offline',True,True),('dnd',True,True),('voicemail',True,True),('offline',False,False),('dnd',False,False),('busy',True,False),('online',True,False)])
+async def test_voicemail_offer_requires_native_mailbox_and_eligible_presence(presence,enabled,offered):
+    runtime,storage,controller,call,client=await prepared(phone=False)
+    client.recipient.return_value.update(effective_presence=presence,voicemail_enabled=enabled)
+    try:
+        await runtime.consultations.start(call,'extension:203','Open ticket')
+        c=call.consultation;await runtime.consultations.begin(call);await c.task
+        assert bool(call.voicemail_offer)==offered
+        data=call.adapter.consultation_say.await_args.args[1]
+        assert bool(data['voicemail_offer'])==offered
+        if offered:
+            assert data['voicemail_offer']=={'offer_ref':c.id}
+            assert call.voicemail_offer['destination']=='extension:203'
+        controller.originate_consult.assert_not_awaited()
+        controller.continue_channel.assert_not_awaited()
+        assert not call.terminal and call.consultation is None
+    finally:await runtime.finish(call,'completed')
+
+
+async def offered_voicemail():
+    runtime,storage,controller,call,client=await prepared()
+    client.recipient.return_value.update(effective_presence='dnd',voicemail_enabled=True)
+    await runtime.consultations.start(call,'extension:203','Open ticket')
+    c=call.consultation;await runtime.consultations.begin(call);await c.task
+    return runtime,storage,controller,call,client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change',['forged','expired','disabled','identity','denied','provider'])
+async def test_voicemail_rejects_stale_or_changed_offers_without_interrupting_caller(change):
+    from voice_agent.runtime import Transfer
+    runtime,storage,controller,call,client=await offered_voicemail()
+    ref=call.voicemail_offer['reference']
+    if change=='forged':ref='0'*32
+    if change=='expired':call.voicemail_offer['expires_at']=time.monotonic()-1
+    if change=='disabled':client.recipient.return_value['voicemail_enabled']=False
+    if change=='identity':client.recipient.return_value['recipient_id']='different'
+    if change=='denied':storage.routing_targets.return_value=[]
+    if change=='provider':client.recipient.side_effect=RuntimeError('private lookup failed')
+    controller.remove_from_bridge.reset_mock()
+    try:
+        assert 'error' in await Transfer(runtime,call).voicemail(ref)
+        controller.continue_channel.assert_not_awaited()
+        controller.remove_from_bridge.assert_not_awaited()
+        controller.originate_consult.assert_not_awaited()
+        assert not call.terminal
+    finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_voicemail_requires_explicit_confirmation_and_commits_only_matching_native_route():
+    from voice_agent.runtime import Transfer
+    from voice_agent.tools import ToolRegistry
+    from test_runtime import transfer_started
+    runtime,storage,controller,call,client=await offered_voicemail()
+    registry=ToolRegistry(call.snapshot,storage.routing_targets,Transfer(runtime,call))
+    ref=call.voicemail_offer['reference']
+    try:
+        assert any(t['name']=='nv_consultation_voicemail_v1' for t in registry.advertised())
+        for args in ({'offer_ref':ref,'confirmed':False},{'offer_ref':ref},{'offer_ref':ref,'confirmed':True,'destination_id':'extension:204'}):
+            assert (await registry.invoke(str(len(registry.invocations)),'nv_consultation_voicemail_v1',args))['error']=='invalid_arguments'
+        task=asyncio.create_task(registry.invoke('confirmed','nv_consultation_voicemail_v1',{'offer_ref':ref,'confirmed':True}))
+        await transfer_started(controller)
+        assert controller.continue_channel.await_args.args[1]=={'context':'voice-agent-voicemail','extension':'203','priority':1}
+        controller.originate_consult.assert_not_awaited()
+        await runtime.event({'type':'StasisEnd','channel':{'id':call.caller_id}})
+        body={'token':call.transfer_token,'destination_id':'extension:203'}
+        await runtime.event({'type':'ChannelUserevent','eventname':'VoiceAgentTransfer','channel':{'id':call.caller_id},'userevent':body})
+        assert not call.transfer_done.is_set()
+        await runtime.event({'type':'ChannelUserevent','eventname':'VoiceAgentTransfer','channel':{'id':call.caller_id},'userevent':{**body,'mode':'voicemail'}})
+        assert await task=={'outcome':'transferred'}
+        assert call.terminal and call.voicemail_offer is None
+    finally:
+        await registry.close()
+        await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_native_voicemail_disappearance_returns_to_bounded_fallback():
+    from voice_agent.runtime import Transfer
+    from test_runtime import transfer_started
+    runtime,storage,controller,call,client=await offered_voicemail()
+    try:
+        task=asyncio.create_task(Transfer(runtime,call).voicemail(call.voicemail_offer['reference']))
+        await transfer_started(controller)
+        await runtime.event({'type':'StasisEnd','channel':{'id':call.caller_id}})
+        await runtime.event({'type':'StasisStart','channel':{'id':call.caller_id},'args':['voicemail_failed',call.session_id,call.transfer_token]})
+        assert await task=={'error':'voicemail_unavailable'}
+        assert call.terminal and not runtime.calls
+        assert controller.continue_channel.await_args.args[1]['context'].startswith('voice-agent-fallback-')
+        assert not any(e['event_type']=='transfer_committed' for e in runtime.monitoring.queue._queue)
+        assert any(e['error_code']=='voicemail_unavailable' for e in runtime.monitoring.queue._queue)
+    finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_route_native_voicemail_to_an_agent_fallback_label():
+    runtime,storage,controller,_=fixtures()
+    storage.media_ownership.return_value={}
+    controller.list_channels.return_value=[{'id':'native-voicemail','dialplan':{'context':'voice-agent-voicemail','app_name':'Stasis','app_data':'voice-agent,voicemail_failed,old,token'}}]
+    await runtime.event({'type':'AgentAriConnected'})
+    controller.continue_channel.assert_not_awaited()
+    controller.hangup.assert_not_awaited()

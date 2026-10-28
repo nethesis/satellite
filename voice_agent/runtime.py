@@ -76,6 +76,7 @@ class Call:
     assistant_snapshot: dict | None = field(default=None, repr=False)
     assistant_binding: dict | None = field(default=None, repr=False)
     consultation: object | None = field(default=None, repr=False)
+    voicemail_offer: dict | None = field(default=None, repr=False)
     private_consultation: object | None = field(default=None, repr=False)
     parent_run_id: str | None = None
     consulted_recipients: set = field(default_factory=set, repr=False)
@@ -88,6 +89,34 @@ class Transfer:
 
     async def consultation_answer(self, answer):
         return await self.runtime.consultations.answer(self.call, answer)
+
+    async def voicemail(self, reference):
+        call = self.call
+        offer = call.voicemail_offer
+        if not offer or reference != offer['reference'] or time.monotonic() >= offer['expires_at']:
+            return {'error': 'voicemail_unavailable'}
+        if call.consultation:
+            c = call.consultation
+            if c.id != reference or not c.task:
+                return {'error': 'voicemail_unavailable'}
+            try:
+                await asyncio.wait_for(asyncio.shield(c.task), 3)
+            except Exception:
+                return {'error': 'voicemail_unavailable'}
+        if not await self.authorized(offer['destination'], offer['candidate']):
+            return {'error': 'destination_denied'}
+        try:
+            if not await self.voicemail_ready(offer['destination'], offer['recipient_id']):
+                return {'error': 'voicemail_unavailable'}
+        except Exception:
+            return {'error': 'voicemail_unavailable'}
+        call.voicemail_offer = None
+        return await self._native_transfer(offer['destination'], candidate_ref=offer['candidate'],
+                                          voicemail_recipient=offer['recipient_id'])
+
+    async def voicemail_ready(self, destination, recipient_id):
+        value = await self.runtime.consultations.client.recipient(destination.split(':', 1)[1])
+        return value['recipient_id'] == recipient_id and value.get('voicemail_enabled') is True
 
     async def hangup(self, reason):
         call = self.call
@@ -124,8 +153,14 @@ class Transfer:
         call = self.call
         if destination_id.startswith('extension:') and call.snapshot.get('consultation', {}).get('mode') == 'attended':
             return await self.runtime.consultations.start(call, destination_id, reason, candidate_ref)
+        return await self._native_transfer(destination_id, candidate_ref=candidate_ref)
+
+    async def _native_transfer(self, destination_id, *, candidate_ref=None, voicemail_recipient=None):
+        call = self.call
         tool_id = 'pbx.transfer'
         target = trusted_target(destination_id, allow_pbx=True)
+        if voicemail_recipient is not None:
+            target['context'] = 'voice-agent-voicemail'
         def permitted(rows):
             from .routing import RoutingPolicy
             policy = RoutingPolicy(call.snapshot)
@@ -142,6 +177,13 @@ class Transfer:
             if not permitted(rows):
                 self.runtime.monitoring.emit(call.run_id, 'tool_denied', error='destination_denied', tool_id=tool_id, destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
                 return {'error': 'destination_denied'}
+            if voicemail_recipient is not None:
+                try:
+                    if not await self.voicemail_ready(destination_id, voicemail_recipient):
+                        return {'error': 'voicemail_unavailable'}
+                except Exception:
+                    return {'error': 'voicemail_unavailable'}
+            call.voicemail_offer = None
             call.transfer_destination_id = destination_id
             call.transfer_target = target
             call.transfer_token = uuid.uuid4().hex
@@ -156,10 +198,12 @@ class Transfer:
             if call.bridge_id:
                 await self.runtime.controller.remove_from_bridge(call.bridge_id,[call.caller_id])
             rows = await asyncio.wait_for(asyncio.to_thread(self.runtime.storage.routing_targets), timeout=5)
-            if not permitted(rows):
-                self.runtime.monitoring.emit(call.run_id, 'tool_denied', error='destination_denied', tool_id=tool_id, destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
-                await self.runtime.finish(call, 'fallback', 'destination_denied', fallback=True)
-                return {'error': 'destination_denied'}
+            error = ('destination_denied' if not permitted(rows) else
+                     'voicemail_unavailable' if voicemail_recipient is not None and not await self.voicemail_ready(destination_id, voicemail_recipient) else None)
+            if error:
+                self.runtime.monitoring.emit(call.run_id, 'tool_denied' if error == 'destination_denied' else 'transfer_failed', error=error, tool_id=tool_id, destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
+                await self.runtime.finish(call, 'fallback', error, fallback=True)
+                return {'error': error}
             await self.runtime.controller.continue_channel(call.caller_id, target)
             await asyncio.wait_for(call.transfer_done.wait(), timeout=10)
             call.trace.end(span, "completed" if call.transfer_outcome == "transferred" else "failed")
@@ -177,9 +221,10 @@ class Transfer:
             self.runtime.monitoring.emit(call.run_id, 'transfer_committed', outcome='transferred',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
             await self.runtime.finish(call, 'transferred', fallback=False)
             return {'outcome': 'transferred'}
-        self.runtime.monitoring.emit(call.run_id, 'transfer_failed', error='transfer_failed',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
-        await self.runtime.finish(call, 'failed', 'transfer_failed', fallback=False)
-        return {'error': 'transfer_failed'}
+        error = 'voicemail_unavailable' if voicemail_recipient is not None else 'transfer_failed'
+        self.runtime.monitoring.emit(call.run_id, 'transfer_failed', error=error,tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
+        await self.runtime.finish(call, 'failed', error, fallback=voicemail_recipient is not None)
+        return {'error': error}
 
 
 class Runtime:
@@ -294,7 +339,7 @@ class Runtime:
                         and channel['id'] not in self.consultations.channels):
                     await self.controller.hangup(channel['id'])
                     continue
-                if context in ('voice-agent-consult','voice-agent-handoff','voice-agent-handoff-wait'):
+                if context in ('voice-agent-consult','voice-agent-handoff','voice-agent-handoff-wait','voice-agent-voicemail'):
                     continue
                 if context == 'voice-agent-provider':
                     await self.controller.hangup(channel['id'])
@@ -320,7 +365,17 @@ class Runtime:
             if not isinstance(args,list) or not all(isinstance(value,str) for value in args):
                 await self.controller.continue_channel(channel_id)
                 return
-            if len(args) == 2 and args[0] == 'caller':
+            if len(args) == 3 and args[0] == 'voicemail_failed':
+                call = self.calls.get(args[1])
+                if (call and not call.terminal and channel_id == call.caller_id
+                        and call.transfer_target and call.transfer_target['context'] == 'voice-agent-voicemail'
+                        and call.transfer_token and args[2].isascii() and hmac.compare_digest(args[2],call.transfer_token)):
+                    call.caller_left = call.transfer_released = False
+                    call.transfer_outcome = 'failed'
+                    call.transfer_done.set()
+                else:
+                    await self.controller.hangup(channel_id)
+            elif len(args) == 2 and args[0] == 'caller':
                 if channel_id not in self.admitting and not any(c.caller_id == channel_id for c in self.calls.values()):
                     if len(self.calls) + len(self.admitting) >= 32 or self.stopping:
                         await self.controller.continue_channel(channel_id)
@@ -341,7 +396,9 @@ class Runtime:
             body = event.get('userevent') or {}
             if call and not call.terminal and call.transfer_target and isinstance(body,dict):
                 token = body.get('token')
-                if isinstance(token,str) and token.isascii() and call.transfer_token and hmac.compare_digest(token,call.transfer_token) and body.get('destination_id') == call.transfer_destination_id:
+                if (isinstance(token,str) and token.isascii() and call.transfer_token
+                        and hmac.compare_digest(token,call.transfer_token) and body.get('destination_id') == call.transfer_destination_id
+                        and (body.get('mode') == 'voicemail') == (call.transfer_target['context'] == 'voice-agent-voicemail')):
                     call.transfer_confirmed = True
                     if call.transfer_released:
                         call.transfer_outcome = 'transferred'
@@ -743,7 +800,7 @@ class Runtime:
         token = None
         try:
             name = event.get('name')
-            tool_id = WIRE_IDS.get(name, name if name in WIRE_IDS.values() else None)
+            tool_id = 'pbx.transfer' if name == 'nv_consultation_voicemail_v1' else WIRE_IDS.get(name, name if name in WIRE_IDS.values() else None)
             arguments = event.get('arguments')
             destination = arguments.get('destination_id') if isinstance(arguments, dict) and tool_id == 'pbx.transfer' else None
             if not isinstance(destination, str) or not re.fullmatch(r'(extension|queue|ivr):[0-9]{1,20}', destination):
