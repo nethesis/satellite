@@ -15,6 +15,7 @@ class Consultation:
     recipient: dict
     reason: str
     candidate: str | None
+    recipient_name: str = ''
     id: str = field(default_factory=lambda: secrets.token_hex(16))
     reference: str = field(default_factory=lambda: secrets.token_hex(4).upper())
     deadline: float = 0
@@ -79,13 +80,16 @@ class Consultations:
             return {'error': 'destination_denied'}
         try:
             recipient = await self.client.recipient(destination.split(':', 1)[1])
+            from .tools import bounded_caller_name
+            inventory = await asyncio.wait_for(asyncio.to_thread(self.runtime.storage.routing_targets), 5)
+            recipient_name = next((bounded_caller_name(row['name']) for row in inventory if row['id'] == destination), '')
         except Exception:
             return {'outcome': 'unavailable'}
         async with self.lock:
             if (call.terminal or call.consultation or call.transfer_target or call.ending_by_agent
                     or recipient['recipient_id'] in self.recipients or recipient['recipient_id'] in call.consulted_recipients or len(self.runtime.calls)+len(self.runtime.admitting) >= 32):
                 return {'outcome': 'unavailable'}
-            c = Consultation(call, destination, recipient, reason.strip(), candidate)
+            c = Consultation(call, destination, recipient, reason.strip(), candidate, recipient_name=recipient_name)
             call.consultation = c
             self.recipients[recipient['recipient_id']] = c
             call.consulted_recipients.add(recipient['recipient_id'])

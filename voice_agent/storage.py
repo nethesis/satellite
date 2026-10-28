@@ -60,17 +60,26 @@ class Storage:
                 placeholders = ','.join(['%s'] * len(variants))
                 # Equality on dst plus a raw calldate range uses the existing
                 # idx_cdr_dst_calldate index. No function is applied to columns.
+                columns = 'calldate,src,dst,channel,dstchannel,lastapp,lastdata,billsec,disposition,linkedid,uniqueid,sequence '
                 records = bounded(
-                    'SELECT calldate,dst,channel,dstchannel,lastapp,lastdata,disposition,linkedid,uniqueid,sequence '
+                    'SELECT ' + columns +
                     f'FROM asterisk.voice_agent_recent_cdr WHERE dst IN ({placeholders}) '
                     'AND calldate >= %s AND calldate <= %s LIMIT 1001',
                     (*variants, earliest.astimezone(zone).replace(tzinfo=None), now.astimezone(zone).replace(tzinfo=None)), examined=500)
+                incoming = bounded(
+                    'SELECT ' + columns +
+                    f'FROM asterisk.voice_agent_recent_cdr WHERE src IN ({placeholders}) '
+                    'AND calldate >= %s AND calldate <= %s AND disposition=\'ANSWERED\' AND billsec>0 LIMIT 1001',
+                    (*variants, earliest.astimezone(zone).replace(tzinfo=None), now.astimezone(zone).replace(tzinfo=None)), examined=500)
+                records = list({(r['uniqueid'], r['sequence']): r for r in records + incoming}.values())
+                if len(records) > 1000:
+                    raise ValueError('recent_lookup_overflow')
                 linked = sorted({r['linkedid'] for r in records if r['linkedid']})
                 if linked:
                     ids = ','.join(['%s'] * len(linked))
                     seen = ','.join(['(%s,%s)'] * len(records))
                     extra = bounded(
-                        'SELECT calldate,dst,channel,dstchannel,lastapp,lastdata,disposition,linkedid,uniqueid,sequence '
+                        'SELECT ' + columns +
                         f'FROM asterisk.voice_agent_recent_cdr WHERE linkedid IN ({ids}) '
                         f'AND (uniqueid,sequence) NOT IN ({seen}) LIMIT {1001-len(records)}',
                         (*linked, *(v for r in records for v in (r['uniqueid'], r['sequence']))), 1000-len(records), examined=500)

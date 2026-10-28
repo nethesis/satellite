@@ -100,6 +100,8 @@ class OpenAILiveAdapter(_RealtimeAdapter):
                       + json.dumps(welcome, ensure_ascii=False) + '. ' if welcome else
                       'Introduce yourself briefly and ask how you can help. ')
                    + 'Then pause and listen. Do not use the backend for this greeting.')
+        if profile.get('_private_consultation'):
+            opening = profile['_opening_instructions'] + ' Do not use the backend for this opening.'
         # The primary media bridge is ready before session.start. SIP acceptance
         # precedes attachment of the caller, so only SIP needs a media-ready gate.
         if not self.primary_audio:
@@ -115,6 +117,8 @@ class OpenAILiveAdapter(_RealtimeAdapter):
         # Startup input already carries the complete welcome and permissions.
         # Long greetings must not become several serial timeline appends.
         self._greeting_activation = (activation if len(activation.encode()) <= 400 else
+            'Recipient media is connected. Deliver the private opening supplied at startup now: caller identity, reason, then ask for consent.'
+            if profile.get('_private_consultation') else
             'Caller media is connected. Greet now in ' + language
             + ' using the welcome and confirmed capabilities supplied at startup, then listen.')
         body = {"type": "live", "model": model,

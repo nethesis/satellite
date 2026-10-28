@@ -38,11 +38,11 @@ def channel_peer(channel):
 
 
 def qualify(rows, devices, trunks, caller, rules, zone, earliest, now):
-    """Require a real device origin AND an outbound trunk dial to this number.
+    """Qualify outbound callbacks and answered inbound conversations.
 
     Local legs may corroborate the same attempt, but cannot establish identity.
-    Reject mixed inbound/outbound groups and multiple device origins rather than
-    guessing from caller ID or a shared linkedid.
+    Outbound callbacks reject mixed groups and multiple device origins. Incoming
+    conversations require the actual answered trunk-to-device leg, not a linkedid guess.
     """
     peers = {}
     for device in devices:
@@ -65,6 +65,32 @@ def qualify(rows, devices, trunks, caller, rules, zone, earliest, now):
                     or (source is None and not channel.startswith('Local/'))):
                 incoming = True
             origins.update(peers.get(source, ()))
+            at = row['calldate']
+            # Native CDR wall times cannot identify either occurrence at DST.
+            first, second = at.replace(tzinfo=zone, fold=0), at.replace(tzinfo=zone, fold=1)
+            if first.utcoffset() != second.utcoffset():
+                continue
+            at = first.astimezone(timezone.utc)
+            if not earliest <= at <= now:
+                continue
+            recipient = peers.get(channel_peer(row.get('dstchannel')), set())
+            if row.get('lastapp') == 'Bridge':
+                peer = (row.get('lastdata') or '').split(',')[0]
+                match = re.fullmatch(r'Local/([0-9]{1,20})@voice-agent-consult-[a-fA-F0-9]+;1', peer)
+                recipient = set()
+                if match:
+                    # An exact native handoff proves the caller joined this
+                    # answered leg; a private consultation by itself does not.
+                    for leg in group:
+                        target = peers.get(channel_peer(leg.get('dstchannel')), set())
+                        if (leg.get('channel') == peer[:-1] + '2' and leg.get('lastapp') == 'Dial'
+                                and leg.get('disposition') == 'ANSWERED' and leg.get('billsec', 0) > 0
+                                and target == {'extension:' + match[1]}):
+                            recipient.update(target)
+            if (source in trunk_peers and normalize_number(row.get('src')) in variants
+                    and row.get('lastapp') in ('Dial', 'Queue', 'Bridge') and row.get('disposition') == 'ANSWERED'
+                    and type(row.get('billsec')) is int and row['billsec'] > 0 and len(recipient) == 1):
+                result.append({'destination_id': next(iter(recipient)), 'called_at': at})
             if normalize_number(row.get('dst')) not in variants:
                 continue
             if row.get('lastapp') != 'Dial' or row.get('disposition') not in {'ANSWERED', 'NO ANSWER', 'BUSY'}:
@@ -88,15 +114,7 @@ def qualify(rows, devices, trunks, caller, rules, zone, earliest, now):
             destination_peer = channel_peer(row.get('dstchannel'))
             if destination_peer and destination_peer != (tech, peer):
                 continue
-            at = row['calldate']
-            # CDR DATETIME has no offset. Exclude ambiguous/nonexistent wall
-            # times instead of inventing which DST occurrence produced it.
-            first, second = at.replace(tzinfo=zone, fold=0), at.replace(tzinfo=zone, fold=1)
-            if first.utcoffset() != second.utcoffset():
-                continue
-            at = first.astimezone(timezone.utc)
-            if earliest <= at <= now:
-                outbound.append(at)
+            outbound.append(at)
         if not incoming and len(origins) == 1 and outbound:
             result.append({'destination_id': next(iter(origins)), 'called_at': max(outbound)})
     return result

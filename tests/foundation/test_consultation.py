@@ -642,3 +642,41 @@ async def test_failed_moh_stop_falls_back_and_retries_cleanup():
         # Native fallback also contains StopMusicOnHold for failed ARI deletion.
         assert sum(args.args[1] is False for args in controller.moh.await_args_list)>=2
     finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_private_live_opening_contains_caller_recipient_and_reason_before_backend():
+    from voice_agent.providers.live_primary import OpenAILiveWebSocketSession
+    from test_agent_models import snapshot as live_snapshot
+    runtime,storage,controller,call,client=await prepared()
+    call.caller_name='Bob Example'
+    storage.routing_targets.return_value=[{'id':'extension:203','name':'Alice Example'}]
+    try:
+        await runtime.consultations.start(call,'extension:203','Discuss open tickets')
+        c=call.consultation;tools=PrivateTools(runtime.consultations,c)
+        opening=tools.opening_instructions('Generic greeting','en')
+        assert all(value in opening for value in ('Bob Example','Alice Example','Discuss open tickets'))
+        assert 'first sentence' in opening and 'explicit consent' in opening
+        profile=live_snapshot('gpt-live-1')['conversation']
+        profile={**profile,'prompt':'Private assistant','greeting':'Generic greeting','_routing_context':await tools.routing_context(),
+                 '_opening_instructions':opening,'_private_consultation':True}
+        adapter=OpenAILiveWebSocketSession({'api_key':'synthetic'})
+        config=adapter.configuration(profile,tools.advertised())
+        voice_opening=config['input'][-1]['content'][0]['text']
+        assert all(value in voice_opening for value in ('Bob Example','Alice Example','Discuss open tickets'))
+        assert 'Generic greeting' not in voice_opening
+        assert 'Introduce yourself briefly and ask how you can help.' not in voice_opening
+        assert 'private opening' in adapter._greeting_activation
+        assert c.responses.empty() and c.state=='pending'
+    finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_private_opening_does_not_invent_unknown_caller_identity():
+    runtime,storage,controller,call,client=await prepared()
+    try:
+        await runtime.consultations.start(call,'extension:203','Wants to speak with the colleague')
+        tools=PrivateTools(runtime.consultations,call.consultation)
+        assert tools.context()['caller_name']==''
+        assert 'Never invent a missing caller name or reason' in tools.opening_instructions('Welcome','it')
+    finally:await runtime.finish(call,'completed')

@@ -586,6 +586,7 @@ class Runtime:
             async with trace.measure('routing_context'):
                 routing_context=await call.tools.routing_context()
             profile['_opening_instructions']=call.tools.opening_instructions(profile['greeting'],profile['language'],call.caller_name)
+            profile['_private_consultation'] = call.private_consultation is not None
             if call.binding.get('adapter') in ('live', 'live_ws'):
                 profile['_routing_context']=routing_context
                 # Live speaks the opening itself; its delegated backend owns directory data.
