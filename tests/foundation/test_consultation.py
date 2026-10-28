@@ -714,7 +714,7 @@ async def test_private_hangup_precedes_slow_provider_finalization():
     try:
         await runtime.consultations.start(call,'extension:203','Open ticket')
         c=call.consultation;phone=PhoneConsultation(runtime,runtime.consultations,c)
-        async def detach():await release.wait()
+        async def detach(*,wait=True):await release.wait()
         phone.detach=detach
         closing=asyncio.create_task(phone.close())
         for _ in range(5):await asyncio.sleep(0)
@@ -832,3 +832,51 @@ async def test_restart_does_not_route_native_voicemail_to_an_agent_fallback_labe
     await runtime.event({'type':'AgentAriConnected'})
     controller.continue_channel.assert_not_awaited()
     controller.hangup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_caller_hears_refusal_before_private_accounting_finishes_and_cleanup_waits():
+    from voice_agent.consultation_phone import PhoneConsultation
+    runtime,storage,controller,call,client=await prepared()
+    finish=runtime.finish;release=asyncio.Event()
+    try:
+        await runtime.consultations.start(call,'extension:203','Open ticket')
+        c=call.consultation;c.state='phone';c.deadline=time.monotonic()+60
+        c.phone=PhoneConsultation(runtime,runtime.consultations,c)
+        private=SimpleNamespace(private_consultation=c)
+        c.phone.private=private
+        async def finalize(target,*args,**kwargs):
+            assert target is private
+            await release.wait()
+        runtime.finish=finalize
+        async def spoken(instruction,data):
+            controller.hangup.assert_awaited_with(c.phone.channel)
+            assert data['message']=='Please send me an email.'
+            assert not release.is_set()
+        call.adapter.consultation_say.side_effect=spoken
+        assert await runtime.consultations.decision(c,{'decision':'decline','text':'Please send me an email.'})
+        assert not c.phone.cleanup_task.done() and not call.terminal
+        cleaning=asyncio.create_task(runtime.consultations.cleanup(c))
+        for _ in range(5):await asyncio.sleep(0)
+        assert not cleaning.done()
+        release.set();await cleaning
+        assert c.phone.cleanup_task.done() and call.consultation is None
+    finally:
+        release.set();runtime.finish=finish
+        await runtime.consultations.cleanup(c)
+        await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_final_refusal_report_can_finish_after_colleague_decision_deadline():
+    runtime,storage,controller,call,client=await prepared()
+    try:
+        await runtime.consultations.start(call,'extension:203','Open ticket')
+        c=call.consultation;c.state='phone';c.deadline=time.monotonic()+.01
+        async def spoken(*args):await asyncio.sleep(.03)
+        call.adapter.consultation_say.side_effect=spoken
+        async with asyncio.timeout_at(c.deadline) as c.budget:
+            assert await runtime.consultations.decision(c,{'decision':'decline','text':'Please send me an email.'})
+        assert c.state=='declined' and not call.terminal
+        assert any(e['event_type']=='consultation_declined' for e in runtime.monitoring.queue._queue)
+    finally:await runtime.finish(call,'completed')
