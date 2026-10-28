@@ -194,6 +194,8 @@ class Transfer:
             # acknowledges the exact destination with this one-use private token.
             await self.runtime.controller.subscribe_channel(call.caller_id)
             await self.runtime.controller.set_variable(call.caller_id,'VOICE_AGENT_TRANSFER_TOKEN',call.transfer_token)
+            if voicemail_recipient is not None:
+                await self.runtime.controller.set_variable(call.caller_id,'AGENT_SESSION_ID',call.session_id)
             await self.runtime.quiesce_media(call)
             if call.bridge_id:
                 await self.runtime.controller.remove_from_bridge(call.bridge_id,[call.caller_id])
