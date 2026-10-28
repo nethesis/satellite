@@ -88,6 +88,7 @@ class PhoneConsultation:
                 c.responses.put_nowait(event)
         self.answered = True
         if not connect_only:
+            c.stage = 'provider'
             await self.start_assistant()
         return True
 

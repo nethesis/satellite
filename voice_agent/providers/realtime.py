@@ -254,7 +254,7 @@ class _RealtimeAdapter:
             }]
         }})
 
-    async def consultation_say(self, instructions, data=None):
+    async def consultation_say(self, instructions, data=None, *, response_id=None):
         if data is not None:
             await self.workflow_input(data)
         await self.workflow_respond(instructions, wait=True)

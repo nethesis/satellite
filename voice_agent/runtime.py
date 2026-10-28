@@ -778,14 +778,7 @@ class Runtime:
                 else:
                     await call.adapter.send_result(event['invocation_id'],result)
                     if result.get('outcome') == 'consulting':
-                        try:
-                            await asyncio.wait_for(call.adapter.consultation_say('Briefly tell the caller that you will check with the requested colleague. Do not claim acceptance or connection.'), 10)
-                            await self.consultations.begin(call)
-                        except Exception:
-                            c = call.consultation
-                            if c:
-                                await self.consultations.resolve(c,'failed',speak=False)
-                                await self.consultations.cleanup(c)
+                        await self.consultations.begin(call, response_id=event.get('response_id'))
                     else:
                         await call.adapter.respond(response_id=event.get('response_id'))
         except asyncio.CancelledError:

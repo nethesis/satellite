@@ -213,6 +213,8 @@ class AudioBridge:
                 if self.stopped:
                     return
                 await self.media.write(frame)
+                if hasattr(self.provider, 'audio_played'):
+                    self.provider.audio_played(frame)
                 deadline = max(deadline + FRAME_SECONDS, time.monotonic())
         except asyncio.CancelledError:
             raise

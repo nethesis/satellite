@@ -76,8 +76,6 @@ class OpenAILiveWebSocketSession(OpenAILiveAdapter):
             except ValueError:
                 raise ProviderError('provider_live_error') from None
             self.audio.append(data)
-            self._consultation_audio_sequence = getattr(self, '_consultation_audio_sequence', 0) + 1
-            self._consultation_audio_at = time.monotonic()
             if not self._output_observed:
                 self._output_observed = True
                 await self._emit({'type': 'audio_started'})
@@ -116,6 +114,13 @@ class OpenAILiveWebSocketSession(OpenAILiveAdapter):
                 self._consultation_input_active = False
             await self._send({'type': 'session.input_audio.append',
                               'audio': base64.b64encode(frame).decode()})
+
+    def audio_played(self, frame):
+        if sum(PCMU_POWER[value] for value in frame) >= len(frame) * 200 ** 2:
+            self._played_speech_sequence = getattr(self, '_played_speech_sequence', 0) + 1
+            self._played_quiet_bytes = 0
+        else:
+            self._played_quiet_bytes = min(8000, getattr(self, '_played_quiet_bytes', 0) + len(frame))
 
     def stop_audio(self):
         self._audio_enabled = False
