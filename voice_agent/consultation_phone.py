@@ -150,16 +150,18 @@ class PhoneConsultation:
             raise ValueError('private_session_closed')
         await self.private.adapter.consultation_say('The caller has answered your one clarification question. Relay the answer faithfully and ask the colleague for a final decision using nv_consultation_decide_v1.',{'answer':answer})
 
-    async def detach(self):
+    async def detach(self, *, wait=True):
         if self.private:
             self.private.private_consultation = None
             self.cleanup_task = self.runtime.spawn(self.runtime.finish(self.private,'completed',fallback=False))
             self.private = None
-        if self.cleanup_task:
+        if wait and self.cleanup_task:
             await asyncio.shield(self.cleanup_task)
 
-    async def close(self, preserve=False):
+    async def close(self, preserve=False, *, wait=True):
         if self.closed:
+            if wait and self.cleanup_task:
+                await asyncio.shield(self.cleanup_task)
             return
         self.closed = True
         try:
@@ -168,6 +170,6 @@ class PhoneConsultation:
                 await self.runtime.controller.hangup(self.channel)
         finally:
             try:
-                await self.detach()
+                await self.detach(wait=wait)
             finally:
                 self.coordinator.channels.pop(self.channel,None)
