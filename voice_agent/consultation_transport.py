@@ -54,6 +54,7 @@ class ConsultationClient:
                 or not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,63}',value['recipient_id'])
                 or value['recipient_id'] == 'voice-agent-assistant' or value.get('mainextension') != extension
                 or type(value.get('chat_allowed')) is not bool
+                or type(value.get('voicemail_enabled')) is not bool
                 or value.get('effective_presence') not in ('online','dnd','busy','ringing','offline','voicemail','cellphone','callforward','unknown')
                 or not isinstance(value.get('device_state'),str) or len(value['device_state'])>32):
             raise ValueError('invalid_recipient')

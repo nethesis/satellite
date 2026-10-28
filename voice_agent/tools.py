@@ -12,6 +12,11 @@ WIRE_IDS = {item['wire_name']: item['id'] for item in SUPPORTED.values()}
 CONTEXT_BYTES = 16384
 CAPABILITY_RESERVE = 2048
 CONSULTATION_TOOLS = json.loads(Path(__file__).with_name('consultation-tools-v1.json').read_text())
+VOICEMAIL_TOOL = {'type': 'function', 'name': 'nv_consultation_voicemail_v1',
+    'description': 'Send the caller to the selected colleague voicemail only after the backend offered it and the caller explicitly agreed. Use the exact offer_ref from that offer. Never guess a mailbox, reuse an old offer or treat unavailability as consent.',
+    'parameters': {'type': 'object', 'additionalProperties': False, 'required': ['offer_ref', 'confirmed'],
+        'properties': {'offer_ref': {'type': 'string', 'pattern': '^[a-f0-9]{32}$'},
+                       'confirmed': {'type': 'boolean', 'const': True}}}}
 
 
 def bounded_caller_name(value):
@@ -65,6 +70,8 @@ class ToolRegistry:
                  if binding['enabled'] and (key != 'pbx.find_recent_callers' or self._recent_enabled())]
         if self.snapshot.get('consultation', {}).get('mode') == 'attended':
             tools.append(copy.deepcopy(CONSULTATION_TOOLS[1]))
+            if self.bindings['pbx.transfer']['enabled']:
+                tools.append(copy.deepcopy(VOICEMAIL_TOOL))
         return tools
 
     def _recent_enabled(self):
@@ -166,7 +173,10 @@ class ToolRegistry:
                 'or connection. Do not issue another transfer while a consultation is pending. The backend will return the '
                 'colleague decision or one question to relay. Submit only the caller actual clarification answer using '
                 'nv_consultation_answer_v1. After an unavailable or declined result, ask the caller before trying a different '
-                'permitted person. Never retry the same person automatically or replace consultation with direct transfer.\n')
+                'permitted person. Relay any colleague message, including a request to send an email, faithfully with attribution. '
+                'If the backend supplies a voicemail offer, ask whether the caller wants to leave a voicemail; only after explicit agreement '
+                'use nv_consultation_voicemail_v1 with its offer_ref and confirmed=true. Never offer voicemail without backend evidence. '
+                'Never retry the same person automatically or replace consultation with direct transfer.\n')
         search = self.bindings['pbx.find_destinations']['enabled']
         if search:
             guidance += ('Use nv_pbx_find_destinations_v1 for name, number or purpose lookup; an empty query lists '
@@ -276,6 +286,12 @@ class ToolRegistry:
         return copy.deepcopy(await asyncio.shield(task))
 
     async def _execute(self, name, arguments):
+        if name == VOICEMAIL_TOOL['name'] and self.snapshot.get('consultation', {}).get('mode') == 'attended' and self.bindings['pbx.transfer']['enabled']:
+            if (not isinstance(arguments, dict) or set(arguments) != {'offer_ref', 'confirmed'}
+                    or arguments['confirmed'] is not True or not isinstance(arguments['offer_ref'], str)
+                    or len(arguments['offer_ref']) != 32):
+                return {'error': 'invalid_arguments'}
+            return await self.controller.voicemail(arguments['offer_ref'])
         if name == 'nv_consultation_answer_v1' and self.snapshot.get('consultation', {}).get('mode') == 'attended':
             if not isinstance(arguments, dict) or set(arguments) != {'answer'}:
                 return {'error': 'invalid_arguments'}

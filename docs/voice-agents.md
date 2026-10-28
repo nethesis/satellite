@@ -141,3 +141,18 @@ trunk-to-device leg, or an exact native attended bridge joined to that answered
 recipient leg. Private consultations and ambiguous Local legs alone do not count.
 The caller still confirms the contact; only a call-bound reference authorizes
 that transfer. Existing manifest versions and stored publications stay unchanged.
+
+Private consultation refusals retain an accompanying colleague message, including
+requests to send an email. The private handset is hung up before provider usage
+finalization; the caller then hears the attributed message. The opening is a
+short colleague greeting with caller name and reason, without a separate
+self-introduction. Explicit acceptance remains required for a person-to-person
+connection.
+
+After an unavailable offline/DND recipient, the caller may explicitly choose
+voicemail only when the native recipient service confirms a configured mailbox.
+The offer expires after at most 60 seconds, is bound to the current call and
+selected recipient, and rechecks native identity, mailbox availability and the
+original destination or recent-contact grant before handoff. Voicemail uses a
+separate native wrapper; it never rings the handset or treats mailbox pickup as
+recipient consent.

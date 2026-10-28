@@ -22,7 +22,7 @@ PROVIDER_CODES = frozenset(('other', 'invalid_value', 'unknown_parameter', 'unsu
 ERRORS = frozenset(('other', 'timeout', 'cancelled', 'transport', 'provider_error',
     'tool_denied', 'destination_denied', 'invalid_arguments', 'invalid_invocation',
     'hangup_unavailable', 'hangup_failed', 'tool_unavailable', 'tool_capacity_exceeded', 'recent_lookup_unavailable',
-    'recent_lookup_overflow', 'transfer_unavailable', 'transfer_unconfirmed',
+    'recent_lookup_overflow', 'voicemail_unavailable', 'transfer_unavailable', 'transfer_unconfirmed',
     'transfer_cancelled', 'transfer_failed', 'transfer_uncertain', 'provider_disconnected',
     'provider_event_error', 'provider_sideband_error', 'provider_unavailable', 'provider_sideband_failed', 'provider_accept_failed', 'provider_stream_failed',
     'provider_answer_failed', 'media_bridge_failed', 'setup_timeout', 'duration_exceeded',
