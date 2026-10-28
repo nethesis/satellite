@@ -71,10 +71,10 @@ def _openai_realtime_tools(tools) -> list[dict]:
     """
     result = copy.deepcopy(_tools(tools))
     for tool in result:
-        if tool.get('name') != 'nv_pbx_transfer_v2':
+        if tool.get('name') not in ('nv_pbx_transfer_v2', 'nv_pbx_transfer_v3'):
             continue
         from ..tools import SUPPORTED
-        canonical = SUPPORTED[('pbx.transfer', 2)]['input_schema']
+        canonical = SUPPORTED[('pbx.transfer', 3 if tool['name'].endswith('_v3') else 2)]['input_schema']
         restricted = copy.deepcopy(canonical)
         restricted['properties']['destination_id']['pattern'] = r'^(extension|queue):[0-9]{1,20}$(?![\s\S])'
         if tool.get('parameters') not in (canonical, restricted):
@@ -253,6 +253,11 @@ class _RealtimeAdapter:
                 "type": "input_text", "text": "Workflow step data:\n" + json.dumps(inputs, ensure_ascii=False)
             }]
         }})
+
+    async def consultation_say(self, instructions, data=None, *, response_id=None):
+        if data is not None:
+            await self.workflow_input(data)
+        await self.workflow_respond(instructions, wait=True)
 
     async def workflow_update(self, instructions, tools, *, auto_response=True):
         """Change the current workflow step without changing the voice/model."""
@@ -438,6 +443,8 @@ class _RealtimeAdapter:
 
     async def _handle(self, raw: dict) -> None:
         kind = raw.get("type")
+        if kind == 'input_audio_buffer.speech_started':
+            await self._emit({'type':'input_speech'})
         try:
             await self._monitoring_event(raw)
         except Exception:

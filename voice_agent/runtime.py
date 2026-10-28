@@ -24,7 +24,7 @@ from .models import conversation_capability
 from .contract import validate_snapshot
 from .providers.webhook import verify_webhook
 from .storage import trusted_target
-from .tools import ToolRegistry, WIRE_IDS
+from .tools import ToolRegistry, WIRE_IDS, bounded_caller_name
 
 
 LOG=logging.getLogger(__name__)
@@ -67,16 +67,56 @@ class Call:
     transcript_bytes: int = 0
     webhook_diagnostics: set = field(default_factory=set)
     caller_number: str | None = field(default=None, repr=False)
+    caller_name: str = field(default='', repr=False)
     recent: object | None = field(default=None, repr=False)
     trace: object | None = field(default=None, repr=False)
     webhook_span: str | None = None
     media: object | None = field(default=None, repr=False)
     audio_bridge: object | None = field(default=None, repr=False)
+    assistant_snapshot: dict | None = field(default=None, repr=False)
+    assistant_binding: dict | None = field(default=None, repr=False)
+    consultation: object | None = field(default=None, repr=False)
+    voicemail_offer: dict | None = field(default=None, repr=False)
+    private_consultation: object | None = field(default=None, repr=False)
+    parent_run_id: str | None = None
+    consulted_recipients: set = field(default_factory=set, repr=False)
+    text_only: bool = False
 
 
 class Transfer:
     def __init__(self, runtime, call):
         self.runtime, self.call = runtime, call
+
+    async def consultation_answer(self, answer):
+        return await self.runtime.consultations.answer(self.call, answer)
+
+    async def voicemail(self, reference):
+        call = self.call
+        offer = call.voicemail_offer
+        if not offer or reference != offer['reference'] or time.monotonic() >= offer['expires_at']:
+            return {'error': 'voicemail_unavailable'}
+        if call.consultation:
+            c = call.consultation
+            if c.id != reference or not c.task:
+                return {'error': 'voicemail_unavailable'}
+            try:
+                await asyncio.wait_for(asyncio.shield(c.task), 3)
+            except Exception:
+                return {'error': 'voicemail_unavailable'}
+        if not await self.authorized(offer['destination'], offer['candidate']):
+            return {'error': 'destination_denied'}
+        try:
+            if not await self.voicemail_ready(offer['destination'], offer['recipient_id']):
+                return {'error': 'voicemail_unavailable'}
+        except Exception:
+            return {'error': 'voicemail_unavailable'}
+        call.voicemail_offer = None
+        return await self._native_transfer(offer['destination'], candidate_ref=offer['candidate'],
+                                          voicemail_recipient=offer['recipient_id'])
+
+    async def voicemail_ready(self, destination, recipient_id):
+        value = await self.runtime.consultations.client.recipient(destination.split(':', 1)[1])
+        return value['recipient_id'] == recipient_id and value.get('voicemail_enabled') is True
 
     async def hangup(self, reason):
         call = self.call
@@ -88,7 +128,7 @@ class Transfer:
         if reason not in ('caller_request', 'conversation_complete') or type(timeout) is not int or not 1 <= timeout <= 10:
             return {'error': 'invalid_arguments'}
         async with call.lock:
-            if (call.terminal or call.transfer_target or call.ending_by_agent or not call.media_connected
+            if (call.terminal or call.transfer_target or call.consultation or call.ending_by_agent or not call.media_connected
                     or self.runtime.calls.get(call.session_id) is not call):
                 return {'error': 'hangup_unavailable'}
             call.ending_by_agent = True
@@ -97,10 +137,30 @@ class Transfer:
             call.hangup_task = self.runtime.spawn(self.runtime.end_after_playback(call))
         return {'outcome': 'ending'}
 
-    async def transfer(self, destination_id, *, candidate_ref=None):
+    async def authorized(self, destination_id, candidate_ref=None):
+        from .routing import RoutingPolicy
+        rows = await asyncio.wait_for(asyncio.to_thread(self.runtime.storage.routing_targets), 5)
+        policy = RoutingPolicy(self.call.snapshot)
+        if destination_id not in {r['id'] for r in rows if r.get('available', True)}:
+            return False
+        if candidate_ref is not None:
+            return bool(self.call.recent and policy.permits_recent(destination_id)
+                and self.call.recent.scope == (self.call.session_id, self.call.snapshot['agent_id'], self.call.snapshot['workflow_version'])
+                and self.call.recent.resolve(candidate_ref, rows) == destination_id)
+        return policy.permits(destination_id)
+
+    async def transfer(self, destination_id, *, candidate_ref=None, reason=None):
+        call = self.call
+        if destination_id.startswith('extension:') and call.snapshot.get('consultation', {}).get('mode') == 'attended':
+            return await self.runtime.consultations.start(call, destination_id, reason, candidate_ref)
+        return await self._native_transfer(destination_id, candidate_ref=candidate_ref)
+
+    async def _native_transfer(self, destination_id, *, candidate_ref=None, voicemail_recipient=None):
         call = self.call
         tool_id = 'pbx.transfer'
         target = trusted_target(destination_id, allow_pbx=True)
+        if voicemail_recipient is not None:
+            target['context'] = 'voice-agent-voicemail'
         def permitted(rows):
             from .routing import RoutingPolicy
             policy = RoutingPolicy(call.snapshot)
@@ -110,13 +170,20 @@ class Transfer:
                             and call.recent.resolve(candidate_ref, rows) == destination_id)
             return policy.permits(destination_id) and destination_id in {r['id'] for r in rows if r.get('available', True)}
         async with call.lock:
-            if call.terminal or call.transfer_target or call.ending_by_agent:
+            if call.terminal or call.transfer_target or call.ending_by_agent or call.consultation:
                 return {'error': 'transfer_unavailable'}
             from .routing import RoutingPolicy
             rows = await asyncio.wait_for(asyncio.to_thread(self.runtime.storage.routing_targets), timeout=5)
             if not permitted(rows):
                 self.runtime.monitoring.emit(call.run_id, 'tool_denied', error='destination_denied', tool_id=tool_id, destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
                 return {'error': 'destination_denied'}
+            if voicemail_recipient is not None:
+                try:
+                    if not await self.voicemail_ready(destination_id, voicemail_recipient):
+                        return {'error': 'voicemail_unavailable'}
+                except Exception:
+                    return {'error': 'voicemail_unavailable'}
+            call.voicemail_offer = None
             call.transfer_destination_id = destination_id
             call.transfer_target = target
             call.transfer_token = uuid.uuid4().hex
@@ -127,14 +194,18 @@ class Transfer:
             # acknowledges the exact destination with this one-use private token.
             await self.runtime.controller.subscribe_channel(call.caller_id)
             await self.runtime.controller.set_variable(call.caller_id,'VOICE_AGENT_TRANSFER_TOKEN',call.transfer_token)
+            if voicemail_recipient is not None:
+                await self.runtime.controller.set_variable(call.caller_id,'AGENT_SESSION_ID',call.session_id)
             await self.runtime.quiesce_media(call)
             if call.bridge_id:
                 await self.runtime.controller.remove_from_bridge(call.bridge_id,[call.caller_id])
             rows = await asyncio.wait_for(asyncio.to_thread(self.runtime.storage.routing_targets), timeout=5)
-            if not permitted(rows):
-                self.runtime.monitoring.emit(call.run_id, 'tool_denied', error='destination_denied', tool_id=tool_id, destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
-                await self.runtime.finish(call, 'fallback', 'destination_denied', fallback=True)
-                return {'error': 'destination_denied'}
+            error = ('destination_denied' if not permitted(rows) else
+                     'voicemail_unavailable' if voicemail_recipient is not None and not await self.voicemail_ready(destination_id, voicemail_recipient) else None)
+            if error:
+                self.runtime.monitoring.emit(call.run_id, 'tool_denied' if error == 'destination_denied' else 'transfer_failed', error=error, tool_id=tool_id, destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
+                await self.runtime.finish(call, 'fallback', error, fallback=True)
+                return {'error': error}
             await self.runtime.controller.continue_channel(call.caller_id, target)
             await asyncio.wait_for(call.transfer_done.wait(), timeout=10)
             call.trace.end(span, "completed" if call.transfer_outcome == "transferred" else "failed")
@@ -152,9 +223,10 @@ class Transfer:
             self.runtime.monitoring.emit(call.run_id, 'transfer_committed', outcome='transferred',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
             await self.runtime.finish(call, 'transferred', fallback=False)
             return {'outcome': 'transferred'}
-        self.runtime.monitoring.emit(call.run_id, 'transfer_failed', error='transfer_failed',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
-        await self.runtime.finish(call, 'failed', 'transfer_failed', fallback=False)
-        return {'error': 'transfer_failed'}
+        error = 'voicemail_unavailable' if voicemail_recipient is not None else 'transfer_failed'
+        self.runtime.monitoring.emit(call.run_id, 'transfer_failed', error=error,tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
+        await self.runtime.finish(call, 'failed', error, fallback=voicemail_recipient is not None)
+        return {'error': error}
 
 
 class Runtime:
@@ -171,6 +243,8 @@ class Runtime:
         self.controller.on_event = self.event
         self.controller.on_disconnect = self.disconnected
         self.stopping = False
+        from .consultation import Consultations
+        self.consultations = Consultations(self)
 
     def trace(self, call):
         if call.trace is None:
@@ -246,6 +320,7 @@ class Runtime:
             # A media channel has no voice-agent-provider dialplan context.
             # Match persisted ownership and trusted channel markers instead.
             owned_media = await asyncio.to_thread(self.storage.media_ownership)
+            owned_sessions = await asyncio.to_thread(self.storage.consultation_ownership)
             # Only recover channels belonging to this app and these generated contexts.
             for channel in await self.controller.list_channels():
                 session = owned_media.get(channel['id']) if isinstance(owned_media, dict) else None
@@ -257,6 +332,16 @@ class Runtime:
                 dialplan = channel.get('dialplan') or {}
                 context = dialplan.get('context', '')
                 if dialplan.get('app_name') != 'Stasis' or not str(dialplan.get('app_data','')).startswith('voice-agent,'):
+                    continue
+                if (context in ('voice-agent-consult','stasis-voice-agent')
+                        and re.fullmatch(r'Local/[0-9]{1,20}@voice-agent-consult-[a-f0-9]+;1',channel.get('name',''))
+                        and await self.controller.get_variable(channel['id'],'AGENT_ROLE') == 'consult'
+                        and await self.controller.get_variable(channel['id'],'AGENT_SESSION_ID') in owned_sessions
+                        and re.fullmatch(r'[a-f0-9]{32}',await self.controller.get_variable(channel['id'],'AGENT_CONSULT_ATTEMPT') or '')
+                        and channel['id'] not in self.consultations.channels):
+                    await self.controller.hangup(channel['id'])
+                    continue
+                if context in ('voice-agent-consult','voice-agent-handoff','voice-agent-handoff-wait','voice-agent-voicemail'):
                     continue
                 if context == 'voice-agent-provider':
                     await self.controller.hangup(channel['id'])
@@ -275,12 +360,24 @@ class Runtime:
             return
         channel = event.get('channel') or {}
         channel_id = channel.get('id')
+        if await self.consultations.event(event):
+            return
         if kind == 'StasisStart':
             args = event.get('args') or []
             if not isinstance(args,list) or not all(isinstance(value,str) for value in args):
                 await self.controller.continue_channel(channel_id)
                 return
-            if len(args) == 2 and args[0] == 'caller':
+            if len(args) == 3 and args[0] == 'voicemail_failed':
+                call = self.calls.get(args[1])
+                if (call and not call.terminal and channel_id == call.caller_id
+                        and call.transfer_target and call.transfer_target['context'] == 'voice-agent-voicemail'
+                        and call.transfer_token and args[2].isascii() and hmac.compare_digest(args[2],call.transfer_token)):
+                    call.caller_left = call.transfer_released = False
+                    call.transfer_outcome = 'failed'
+                    call.transfer_done.set()
+                else:
+                    await self.controller.hangup(channel_id)
+            elif len(args) == 2 and args[0] == 'caller':
                 if channel_id not in self.admitting and not any(c.caller_id == channel_id for c in self.calls.values()):
                     if len(self.calls) + len(self.admitting) >= 32 or self.stopping:
                         await self.controller.continue_channel(channel_id)
@@ -301,7 +398,9 @@ class Runtime:
             body = event.get('userevent') or {}
             if call and not call.terminal and call.transfer_target and isinstance(body,dict):
                 token = body.get('token')
-                if isinstance(token,str) and token.isascii() and call.transfer_token and hmac.compare_digest(token,call.transfer_token) and body.get('destination_id') == call.transfer_destination_id:
+                if (isinstance(token,str) and token.isascii() and call.transfer_token
+                        and hmac.compare_digest(token,call.transfer_token) and body.get('destination_id') == call.transfer_destination_id
+                        and (body.get('mode') == 'voicemail') == (call.transfer_target['context'] == 'voice-agent-voicemail')):
                     call.transfer_confirmed = True
                     if call.transfer_released:
                         call.transfer_outcome = 'transferred'
@@ -348,6 +447,8 @@ class Runtime:
                 raise ValueError('invalid_entrypoint')
             snapshot = await asyncio.wait_for(asyncio.to_thread(self.storage.snapshot, agent_id), timeout=5)
             snapshot = validate_snapshot(snapshot)
+            if snapshot.get('role') == 'consultation':
+                raise ValueError('internal_agent_not_public')
             observations.append(('snapshot', origin, time.monotonic()))
             if len(self.monitoring.pending) >= MAX_PENDING - RESERVED:
                 raise ValueError('monitoring_capacity_exceeded')
@@ -379,6 +480,22 @@ class Runtime:
             call.deadline = time.monotonic()+snapshot['max_call_duration_seconds']
             from .recent_callers import RecentCallerResolver, normalize_number
             call.caller_number = normalize_number((channel.get('caller') or {}).get('number'))
+            call.caller_name = bounded_caller_name((channel.get('caller') or {}).get('name'))
+            if snapshot.get('consultation', {}).get('mode') == 'attended':
+                try:
+                    assistant = validate_snapshot(await asyncio.wait_for(asyncio.to_thread(self.storage.snapshot, snapshot['consultation']['assistant_id']), 5))
+                    if assistant.get('role') != 'consultation':
+                        raise ValueError('invalid_internal_assistant')
+                    internal_binding = await asyncio.wait_for(asyncio.to_thread(self.storage.binding, assistant['provider_binding_id']), 5)
+                    if internal_binding['provider'] != assistant['provider']:
+                        raise ValueError('provider_mismatch')
+                    capability = conversation_capability(assistant['provider'], assistant['conversation'])
+                    call.assistant_snapshot = assistant
+                    call.assistant_binding = {**internal_binding, 'model': assistant['conversation']['model'], 'adapter': 'live_ws' if capability['adapter'] == 'live' else capability['adapter']}
+                except Exception:
+                    # A missing consultation component must not reject a working
+                    # Receptionist session or silently authorize direct transfer.
+                    call.assistant_snapshot = call.assistant_binding = None
             call.recent = RecentCallerResolver(snapshot, call.caller_number, self.storage.recent_calls,
                                               (call.session_id, snapshot['agent_id'], snapshot['workflow_version']))
             # Durable correlation exists before SIP origination or webhook acceptance.
@@ -527,7 +644,8 @@ class Runtime:
             profile['prompt'] = profile.pop('instructions')
             async with trace.measure('routing_context'):
                 routing_context=await call.tools.routing_context()
-            profile['_opening_instructions']=call.tools.opening_instructions(profile['greeting'],profile['language'])
+            profile['_opening_instructions']=call.tools.opening_instructions(profile['greeting'],profile['language'],call.caller_name)
+            profile['_private_consultation'] = call.private_consultation is not None
             if call.binding.get('adapter') in ('live', 'live_ws'):
                 profile['_routing_context']=routing_context
                 # Live speaks the opening itself; its delegated backend owns directory data.
@@ -602,6 +720,8 @@ class Runtime:
                 if call.terminal:
                     break
                 self.observe(call, event)
+                if event.get('type') == 'input_speech' and call.private_consultation:
+                    call.private_consultation.colleague_spoke = True
                 if event.get('type') == 'closed':
                     await self.finish(call, 'fallback', 'provider_disconnected', fallback=True)
                     break
@@ -682,7 +802,7 @@ class Runtime:
         token = None
         try:
             name = event.get('name')
-            tool_id = WIRE_IDS.get(name, name if name in WIRE_IDS.values() else None)
+            tool_id = 'pbx.transfer' if name == 'nv_consultation_voicemail_v1' else WIRE_IDS.get(name, name if name in WIRE_IDS.values() else None)
             arguments = event.get('arguments')
             destination = arguments.get('destination_id') if isinstance(arguments, dict) and tool_id == 'pbx.transfer' else None
             if not isinstance(destination, str) or not re.fullmatch(r'(extension|queue|ivr):[0-9]{1,20}', destination):
@@ -717,7 +837,10 @@ class Runtime:
                     await asyncio.shield(call.hangup_task)
                 else:
                     await call.adapter.send_result(event['invocation_id'],result)
-                    await call.adapter.respond(response_id=event.get('response_id'))
+                    if result.get('outcome') == 'consulting':
+                        await self.consultations.begin(call, response_id=event.get('response_id'))
+                    else:
+                        await call.adapter.respond(response_id=event.get('response_id'))
         except asyncio.CancelledError:
             trace.end(span, 'cancelled', error='cancelled')
             raise
@@ -733,12 +856,26 @@ class Runtime:
         await self.finish(call, 'ended_by_agent', fallback=False)
 
     async def finish(self, call, outcome, error=None, fallback=False):
+        if call.text_only:
+            fallback = False
         async with call.lock:
             if call.terminal:
                 return
             call.terminal = True
             if call.ending_by_agent:
                 outcome, fallback = 'ended_by_agent', False
+        consultation = call.consultation
+        if consultation:
+            await self.consultations.cancel(call)
+            # A concurrent shutdown/provider failure may have begun before the
+            # consultation committed to native ownership. Never compete with it.
+            if consultation.transferred or consultation.uncertain or (consultation.releasing and consultation.native_started):
+                fallback = False
+                call.caller_left = True
+                outcome = 'transferred' if consultation.transferred else 'failed'
+                error = None if consultation.transferred else 'transfer_uncertain'
+        if call.private_consultation:
+            await self.consultations.private_ended(call.private_consultation, call)
         if call.hangup_task and call.hangup_task is not asyncio.current_task():
             call.hangup_task.cancel()
             await asyncio.gather(call.hangup_task, return_exceptions=True)
@@ -797,10 +934,11 @@ class Runtime:
                     except Exception:
                         pass
         trace.end(fallback_span, 'failed' if fallback_failed else 'completed',error='fallback_failed' if fallback_failed else None)
-        try:
-            await self.controller.hangup(call.leg_id)
-        except Exception:
-            cleanup_failed = True
+        if not call.text_only:
+            try:
+                await self.controller.hangup(call.leg_id)
+            except Exception:
+                cleanup_failed = True
         if call.media:
             try:
                 await call.media.close()

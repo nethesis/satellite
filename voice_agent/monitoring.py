@@ -13,6 +13,7 @@ EVENTS = frozenset(('admitted', 'provider_connected', 'media_connected', 'respon
     'completed', 'fallback', 'failed', 'interrupted', 'tool_started', 'tool_completed',
     'tool_failed', 'tool_denied', 'transfer_requested', 'transfer_committed', 'transfer_failed',
     'transfer_uncertain', 'trace_started', 'trace_finished', 'trace_gap', 'usage_snapshot', 'provider_output', 'transcription_failed'))
+EVENTS = EVENTS | frozenset('consultation_' + state for state in ('announced','held','phone','phone_failed','chat','connecting','clarification','transferred','uncertain','replied','declined','unavailable','timed_out','cancelled','failed','recovery_failed'))
 OUTCOMES = frozenset(('running', 'completed', 'fallback', 'failed', 'interrupted', 'transferred', 'ended_by_agent'))
 BASE_FIELDS = {'event_id', 'run_id', 'event_type', 'outcome', 'error_code', 'tool_id', 'destination_id', 'occurred_at'}
 DETAIL_FIELDS = {'result_count', 'monitoring_version', 'span_id', 'parent_span_id', 'phase', 'status',

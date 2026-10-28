@@ -32,7 +32,7 @@ def create_app(token: str, runtime=None) -> FastAPI:
     def ready(authorization: str = Header(default='')):
         if not authorization.isascii() or not hmac.compare_digest(authorization, 'Bearer ' + token):
             raise HTTPException(status_code=401, detail='unauthorized')
-        return {'status': 'ready', 'milestone': 'v0.1-configuration' if runtime else 'M0', 'contract_version': 8,
+        return {'status': 'ready', 'milestone': 'v0.1-configuration' if runtime else 'M0', 'contract_version': 9, 'supported_contract_versions': [8,9],
                 'voice_calls_enabled': bool(runtime and runtime.controller.connected),
                 'monitoring_degraded': bool(runtime and runtime.monitoring.degraded)}
 
@@ -88,8 +88,8 @@ def main():
     parser.add_argument('--check-snapshot', type=Path, help='Validate a synthetic snapshot offline')
     args = parser.parse_args()
     if args.check_snapshot:
-        validate_snapshot(json.loads(args.check_snapshot.read_text()))
-        print(json.dumps({'valid': True, 'contract_version': 8}))
+        value = validate_snapshot(json.loads(args.check_snapshot.read_text()))
+        print(json.dumps({'valid': True, 'contract_version': value['contract_version']}))
         return
     host, port = settings()
     app = app_from_env()

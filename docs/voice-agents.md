@@ -32,6 +32,18 @@ acknowledgement and Stasis release. A tool acknowledgement alone is never succes
 Compact media/provider channel identities fit native CDR/CEL limits; session/run
 UUIDs remain independent. Hangup is opt-in, bounded and rechecks caller ownership.
 
+The opening receives the PBX-resolved caller name from the admitted ARI channel,
+bounded to 256 UTF-8 bytes with control characters removed. The model is asked to
+use a confidently identified first name and otherwise greet neutrally, including
+for anonymous, numeric, company-only or ambiguous names. This display data grants
+no permissions and does not change the configured welcome or language policy.
+It is call-local; it is not added to publications or monitoring metadata. Actual
+pronunciation and name selection still require human listening acceptance.
+
+Attended transfer is not enabled. Its service-authenticated presence/chat and
+native handoff integration gates must pass before introducing a new publication
+contract or consultation flow. Existing v8 publications and tools-v5 are unchanged.
+
 Configuration and monitoring use separate least-privilege MariaDB accounts. Runs,
 format-2 metadata/events and optional encrypted debug transcripts are stored in
 `asteriskcdrdb`. Durable bounded outboxes preserve idempotency across retries and
@@ -116,3 +128,31 @@ inbound `FROM_DID`, with the native `agent:<agent_id>` identity proposed for
 identity and empty caller fields is not verified:** the experimental dialplan was
 not available in the workspace. Real CleverAI calling, audio, webhook setup and
 remote identity mapping require external acceptance testing before rollout.
+
+Private consultation openings receive the caller's available PBX name, the
+requested colleague's native display name and the caller's concise reason before
+speech starts. The speaking model announces those facts immediately, then asks
+for explicit consent. Missing names and details must not be invented.
+
+Recent-contact lookup retains its configured lookback and exclusions. It includes
+existing outbound callback attempts and answered conversations initiated by the
+external caller. Incoming evidence requires a positive-duration, answered native
+trunk-to-device leg, or an exact native attended bridge joined to that answered
+recipient leg. Private consultations and ambiguous Local legs alone do not count.
+The caller still confirms the contact; only a call-bound reference authorizes
+that transfer. Existing manifest versions and stored publications stay unchanged.
+
+Private consultation refusals retain an accompanying colleague message, including
+requests to send an email. The private handset is hung up before provider usage
+finalization; the caller then hears the attributed message. The opening is a
+short colleague greeting with caller name and reason, without a separate
+self-introduction. Explicit acceptance remains required for a person-to-person
+connection.
+
+After an unavailable offline/DND recipient, the caller may explicitly choose
+voicemail only when the native recipient service confirms a configured mailbox.
+The offer expires after at most 60 seconds, is bound to the current call and
+selected recipient, and rechecks native identity, mailbox availability and the
+original destination or recent-contact grant before handoff. Voicemail uses a
+separate native wrapper; it never rings the handset or treats mailbox pickup as
+recipient consent.

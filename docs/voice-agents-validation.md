@@ -1,5 +1,41 @@
 # Alpha validation
 
+## Caller greeting and attended-transfer gates — 2026-10-27
+
+Starting sources: Satellite `03eb3dcf84eface5cc8eee3a24ca6cf026bb70dc` and
+NethVoice `54b42f8714df2adce228b8696da70aeda6a33170`. New branches are
+`voice_agents_attended_transfer`, targeting `voice_agents` in each repository.
+
+The runtime now pins the PBX caller display name at admission, strips controls,
+bounds it to 256 UTF-8 bytes and passes it as untrusted opening context. First-name
+selection is left to the model, with explicit neutral-fallback and language
+guidance. No publication, manifest, database, persisted name or grant changes.
+
+Validation: 49 greeting cases passed; the full standalone foundation suite passed
+292 cases with five database cases skipped. The paired PHP/MariaDB/runtime
+harness passed all 297 runtime cases plus native dialplan, setup repetition,
+interruption, restore, immutable contracts and least-privilege checks. Nine native
+PHP transcription regressions passed. Existing aiohttp deprecation warnings remain;
+the optional full Wizard HTTP authentication harness was not selected.
+
+An isolated native `Bridge()` proof on staging Asterisk 22.10.0 passed using two
+synthetic answered Local channels and the existing images. Both exact IDs entered
+one basic bridge and emitted `StasisEnd`; the bridge survived test-controller
+disconnect and the original absolute timeout. Full Local `;1` channel names are
+required to avoid prefix matching the `;2` peer. Passive ARI subscriptions remain
+listed after release; use `StasisEnd` for ownership evidence. Cleanup left zero
+calls and unchanged containers. No staff/external calls, provider connections,
+service restarts, new image deployment or human audio acceptance occurred.
+
+**Incomplete feature:** the existing CTI middleware v0.7.0 and chat gateway have
+no scoped, human-session-independent presence/chat-permission service read.
+An upstream prerequisite and verified versioned image are required before
+consultation integration. Attended transfer, new contracts, colleague sessions,
+chat, clarification, administration UI and production handoff remain unimplemented
+and disabled. The primitive proof does not establish production media privacy,
+recording/CDR continuity or actual Satellite-shutdown survival. See the sibling
+NethVoice integration record for the repeatable probe and exact image identities.
+
 The cleanup starts from NethVoice `d1e23cae8f286af401397afa290cf5fe94d09d30`
 and Satellite `327b714ed977970afe1ac97fd9a5fc9af839c94a`, including the
 separately preserved callback and compact-channel-ID fixes. Recovery bundles,
@@ -225,3 +261,23 @@ provider/callback tests**; UI type/lint/format checks, **seven UI unit tests**, 
 production build and browser regressions. Repeated installation preserves native
 IVR data, drafts, credentials, immutable publications and the canonical catalog.
 No commit, push, deployment or real provider calls were performed for this removal.
+
+### Attended announcement and failure recovery regression
+
+The attended tool now continues the Live backend after submitting its result,
+then waits for speech followed by one second of quiet at the paced PBX media
+writer. Context acknowledgements remain correlated by client event ID and do
+not count as speech. Continuous silent Live frames do not require an empty
+queue. This is an audio activity boundary, not verification of spoken wording;
+real listening remains an acceptance gate.
+
+Announcement, native hold, recipient lookup, origination and private provider
+failures carry bounded stage codes. Recovery stops the private leg and native
+music before reporting the result. A failed caller recovery immediately uses
+the configured native fallback. Caller-session termination also stops owned
+hold music. The native recipient contract uses Asterisk hint state `0` for an
+idle phone; friendly presence labels are not substituted for that state.
+
+Local verification: 357 paired database/runtime tests, 79 focused tests and nine
+transcription regressions passed. These checks do not establish real ringing,
+audible music, private assistant audio, consent or a two-way human conversation.
