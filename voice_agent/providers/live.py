@@ -223,6 +223,9 @@ class OpenAILiveAdapter(_RealtimeAdapter):
         if ack and not ack[1].done():
             if kind == "error":
                 ack[1].set_exception(ProviderError("openai live command rejected"))
+                # The command's caller owns recovery; a rejected announcement
+                # must not race a second, fatal session-wide fallback.
+                return
             elif kind == ack[0]:
                 ack[1].set_result(None)
         if kind == "error":

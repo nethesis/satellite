@@ -198,3 +198,4 @@ async def test_consultation_rejected_append_fails_without_waiting_for_speech():
     await session._handle({'type': 'error', 'error': {'client_event_id': command['event_id'], 'message': 'PRIVATE'}})
     with pytest.raises(ProviderError, match='command rejected'):
         await asyncio.wait_for(task, .5)
+    assert not any(event.get('type') == 'error' for event in session._queue._queue)
