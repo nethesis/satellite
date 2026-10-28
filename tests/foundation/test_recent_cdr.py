@@ -88,8 +88,12 @@ def test_real_cdr_views_query_bounds_and_privileges(monkeypatch):
     found = module.Storage().recent_calls(NUMBER, 7)
     assert len(found) == 1 and found[0]['destination_id'] == 'extension:203'
     assert module.Storage().recent_calls('+390200000000', 7) == []
+    conversations = module.Storage().recent_calls('+390212345679', 7)
+    assert len(conversations) == 1 and conversations[0]['destination_id'] == 'extension:203'
     with pytest.raises(ValueError, match='recent_lookup_overflow'):
         module.Storage().recent_calls('+390212340999', 7)
+    with pytest.raises(ValueError, match='recent_lookup_overflow'):
+        module.Storage().recent_calls('+390212340998', 7)
     with connect('config') as db:
         cursor = db.cursor()
         for sql in ('SELECT * FROM asteriskcdrdb.cdr LIMIT 0',
@@ -97,3 +101,52 @@ def test_real_cdr_views_query_bounds_and_privileges(monkeypatch):
                     'SELECT * FROM asterisk.trunks LIMIT 0'):
             with pytest.raises(mysql.connector.Error):
                 cursor.execute(sql)
+
+
+def incoming(**changes):
+    return row(src=NUMBER, dst='203', channel='PJSIP/outbound-test-00000001',
+               dstchannel='PJSIP/203-00000002', lastdata='', billsec=30, **changes)
+
+
+@pytest.mark.parametrize('application', ['Dial', 'Queue'])
+def test_caller_initiated_answered_conversation_proposes_actual_recipient(application):
+    assert resolve([incoming(lastapp=application)]) == [
+        {'destination_id':'extension:203','called_at':NOW-timedelta(hours=2)}]
+
+
+@pytest.mark.parametrize('changes', [
+    {'src':'+390299999999'}, {'src':'212345678'}, {'disposition':'NO ANSWER'},
+    {'disposition':'BUSY'}, {'billsec':0}, {'billsec':-1}, {'lastapp':'VoiceMail'},
+    {'channel':'PJSIP/203-00000001'}, {'channel':'PJSIP/unknown-trunk-00000001'},
+    {'channel':'Local/203@from-internal-00000001;2'},
+    {'dstchannel':'PJSIP/999-00000002'}, {'dstchannel':'Local/203@from-internal-00000001;1'},
+    {'calldate':NOW.replace(tzinfo=None)-timedelta(days=8)},
+])
+def test_unanswered_or_unproven_incoming_contacts_are_not_proposed(changes):
+    record=incoming();record.update(changes)
+    assert resolve([record]) == []
+
+
+def test_both_directions_use_latest_conversation_without_inventing_local_legs():
+    outbound=row(linkedid='outbound')
+    inbound=incoming(linkedid='inbound',calldate=NOW.replace(tzinfo=None)-timedelta(hours=1))
+    assert resolve([outbound,inbound]) == [
+        {'destination_id':'extension:203','called_at':NOW-timedelta(hours=2)},
+        {'destination_id':'extension:203','called_at':NOW-timedelta(hours=1)}]
+    devices=DEVICES+[{'device_id':'90203','tech':'PJSIP','destination_id':'extension:203'}]
+    inbound['dstchannel']='PJSIP/90203-00000002'
+    assert qualify([inbound],devices,TRUNKS,NUMBER,(),ZoneInfo('UTC'),NOW-timedelta(days=7),NOW)[0]['destination_id']=='extension:203'
+
+
+def test_native_attended_handoff_counts_only_the_leg_actually_joined_by_caller():
+    peer='Local/203@voice-agent-consult-000000ab;1'
+    caller=incoming();caller.update(lastapp='Bridge',lastdata=peer+',x',dstchannel=peer)
+    colleague=row(channel=peer[:-1]+'2',dst='203',lastdata='',billsec=50,dstchannel='PJSIP/203-00000003')
+    assert resolve([caller,colleague]) == [{'destination_id':'extension:203','called_at':NOW-timedelta(hours=2)}]
+    assert resolve([colleague]) == []
+    for change in ({'linkedid':'unrelated'},{'channel':'Local/203@voice-agent-consult-000000ac;2'},
+                   {'dstchannel':'PJSIP/999-00000003'},{'billsec':0},{'disposition':'NO ANSWER'}):
+        wrong=dict(colleague,**change)
+        assert resolve([caller,wrong]) == []
+    caller['billsec']=0
+    assert resolve([caller,colleague]) == []

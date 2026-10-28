@@ -128,3 +128,16 @@ inbound `FROM_DID`, with the native `agent:<agent_id>` identity proposed for
 identity and empty caller fields is not verified:** the experimental dialplan was
 not available in the workspace. Real CleverAI calling, audio, webhook setup and
 remote identity mapping require external acceptance testing before rollout.
+
+Private consultation openings receive the caller's available PBX name, the
+requested colleague's native display name and the caller's concise reason before
+speech starts. The speaking model announces those facts immediately, then asks
+for explicit consent. Missing names and details must not be invented.
+
+Recent-contact lookup retains its configured lookback and exclusions. It includes
+existing outbound callback attempts and answered conversations initiated by the
+external caller. Incoming evidence requires a positive-duration, answered native
+trunk-to-device leg, or an exact native attended bridge joined to that answered
+recipient leg. Private consultations and ambiguous Local legs alone do not count.
+The caller still confirms the contact; only a call-bound reference authorizes
+that transfer. Existing manifest versions and stored publications stay unchanged.

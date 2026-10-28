@@ -154,6 +154,8 @@ async def test_callback_request_guidance_reaches_the_speaking_model_and_backend(
     for context in contexts:
         assert 'someone called me yesterday' in context
         assert 'someone called me from this number' in context
+        assert 'I called and spoke with someone' in context
+        assert 'answered conversations the caller initiated' in context
         assert 'before asking who called' in context
         assert 'Never ask the caller for their phone number' in context
         assert 'Never speak extension numbers' in context
