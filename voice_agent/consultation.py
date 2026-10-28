@@ -41,6 +41,9 @@ class Consultation:
     caller_release_requested: bool = False
     native_failure: asyncio.Event = field(default_factory=asyncio.Event)
     colleague_spoke: bool = False
+    response_id: str | None = None
+    stage: str = 'announcement'
+    failure_reason: str | None = None
 
 
 class Consultations:
@@ -54,9 +57,9 @@ class Consultations:
         self.channels = {}
         self.lock = asyncio.Lock()
 
-    def emit(self, c, state):
+    def emit(self, c, state, error=None):
         self.runtime.monitoring.emit(c.caller.run_id, 'consultation_' + state,
-            tool_id='pbx.transfer', destination_id=c.destination,
+            tool_id='pbx.transfer', destination_id=c.destination, error=error,
             elapsed_ms=self.runtime.trace(c.caller).elapsed(),key=c.id+':'+state)
 
     async def allowed(self, c):
@@ -90,25 +93,30 @@ class Consultations:
         # announcement, hold updates or clarification can generate new speech.
         return {'outcome': 'consulting', 'message': 'The backend will check with this colleague. Do not claim connection or contact another person while it is pending.'}
 
-    async def begin(self, call):
+    async def begin(self, call, *, response_id=None):
         c = call.consultation
         if not c or c.task:
             return
         c.deadline = min(call.deadline, time.monotonic() + 60)
+        c.response_id = response_id
         c.task = self.runtime.spawn(self.run(c), call)
 
     async def hold(self, c, enabled):
         call = c.caller
-        if enabled == c.held or call.terminal or c.releasing:
+        if enabled == c.held or (enabled and call.terminal) or c.releasing:
             return
         if enabled:
-            await self.runtime.controller.remove_from_bridge(call.bridge_id, [call.caller_id])
-            c.held = True
-            await self.runtime.controller.moh(call.caller_id, True)
+            async with asyncio.timeout(3):
+                # A timed-out ARI request may still have detached the caller.
+                c.held = True
+                await self.runtime.controller.remove_from_bridge(call.bridge_id, [call.caller_id])
+                await self.runtime.controller.moh(call.caller_id, True)
         else:
-            await self.runtime.controller.moh(call.caller_id, False)
-            await self.runtime.controller.add_to_bridge(call.bridge_id, [call.caller_id])
-            c.held = False
+            async with asyncio.timeout(3):
+                await self.runtime.controller.moh(call.caller_id, False)
+                if not call.terminal:
+                    await self.runtime.controller.add_to_bridge(call.bridge_id, [call.caller_id])
+                c.held = False
 
     async def notice(self, c, instruction, data=None, restore_hold=False):
         async with c.media_lock:
@@ -123,31 +131,42 @@ class Consultations:
         update = None
         try:
             async with asyncio.timeout_at(c.deadline):
+                async with asyncio.timeout(15):
+                    await c.caller.adapter.consultation_say('Briefly tell the caller that you will check with the requested colleague, then pause. Do not claim acceptance or connection.', response_id=c.response_id)
+                self.emit(c, 'announced')
+                c.stage = 'moh'
                 await self.hold(c, True)
+                self.emit(c, 'held')
                 update = asyncio.create_task(self.updates(c))
                 config = c.caller.snapshot['consultation']
+                if config['phone'] and not self.can_ring(c.recipient):
+                    c.failure_reason = 'consultation_recipient_unavailable'
                 if config['phone'] and self.can_ring(c.recipient):
                     try:
                         await self.phone(c)
                     except Exception:
                         if c.releasing or c.uncertain:
                             raise
-                        self.emit(c, 'phone_failed')
+                        c.failure_reason = 'consultation_' + c.stage + '_failed'
+                        self.emit(c, 'phone_failed', c.failure_reason)
                 if c.state not in TERMINAL and config['chat']:
                     # A closed phone leg cannot submit a late decision into chat.
                     while not c.responses.empty():
                         c.responses.get_nowait()
                     c.state = 'chat'
+                    c.stage = 'chat'
                     self.emit(c, 'chat')
                     await self.chat(c)
                 if c.state not in TERMINAL:
                     await self.resolve(c, 'unavailable')
         except TimeoutError:
+            c.failure_reason = 'consultation_' + c.stage + '_timeout'
             await self.resolve(c, 'timed_out')
         except asyncio.CancelledError:
             await self.resolve(c, 'cancelled', speak=False)
             raise
         except Exception:
+            c.failure_reason = 'consultation_' + c.stage + '_failed'
             await self.resolve(c, 'failed')
         finally:
             if update:
@@ -157,7 +176,7 @@ class Consultations:
 
     @staticmethod
     def can_ring(recipient):
-        return recipient.get('effective_presence') == 'online' and recipient.get('device_state') == 'online'
+        return recipient.get('effective_presence') == 'online' and recipient.get('device_state') == '0'
 
     async def current(self, c):
         if not await self.allowed(c):
@@ -169,21 +188,27 @@ class Consultations:
         return value
 
     async def phone(self, c, connect_only=False):
+        c.stage = 'presence'
         if not self.can_ring(await self.current(c)):
+            c.failure_reason = 'consultation_recipient_unavailable'
             return
         c.state = 'connecting' if connect_only else 'phone'
         self.emit(c, 'connecting' if connect_only else 'phone')
         c.phone = self.phone_factory(self.runtime, self, c)
+        c.stage = 'origination'
         try:
             answered = await c.phone.ring(min(20, max(0, c.deadline-time.monotonic())), connect_only)
             if not answered:
+                c.failure_reason = c.failure_reason or 'consultation_no_answer'
                 return
+            c.stage = 'provider'
             if connect_only:
                 await self.connect(c)
                 return
             while c.state not in TERMINAL:
                 response = await c.responses.get()
                 if response['decision'] == 'phone_closed':
+                    c.failure_reason = c.failure_reason or 'consultation_recipient_closed'
                     return
                 if await self.decision(c, response):
                     return
@@ -344,7 +369,12 @@ class Consultations:
         for seconds in (20,40):
             await asyncio.sleep(max(0, origin+seconds-time.monotonic()))
             if c.state in ('phone','chat') and not c.releasing:
-                await self.notice(c, 'Briefly tell the caller that you are still checking with their colleague. Do not claim an answer or connection. Then pause.', restore_hold=True)
+                try:
+                    await self.notice(c, 'Briefly tell the caller that you are still checking with their colleague. Do not claim an answer or connection. Then pause.', restore_hold=True)
+                except Exception:
+                    c.failure_reason = 'consultation_update_failed'
+                    await self.resolve(c, 'failed')
+                    return
 
     async def connect(self, c):
         current = await self.current(c)
@@ -379,6 +409,7 @@ class Consultations:
             self.emit(c, 'transferred')
             await self.runtime.finish(c.caller, 'transferred')
         except BaseException:
+            c.failure_reason = 'consultation_handoff_failed'
             state = 'unavailable'
             if c.native_started and not c.native_failure.is_set():
                 try:
@@ -396,7 +427,7 @@ class Consultations:
             # a competing transfer/fallback on an unconfirmed native handoff.
             c.uncertain = True
             c.state = 'failed'
-            self.emit(c, 'uncertain')
+            self.emit(c, 'uncertain', 'transfer_uncertain')
             c.caller.caller_left = True
             await self.runtime.finish(c.caller, 'failed', 'transfer_uncertain', fallback=False)
             raise
@@ -406,17 +437,23 @@ class Consultations:
             if c.state in TERMINAL:
                 return
             c.state = outcome
-        self.emit(c, outcome)
+            if not c.responses.full():
+                c.responses.put_nowait({'decision': 'phone_closed'})
+        self.emit(c, outcome, c.failure_reason)
         if speak and not c.caller.terminal and not c.releasing:
             try:
+                # End ringing/private media before spending time reporting the
+                # result. Failed announcements must also resume conversation.
+                if c.phone:
+                    await c.phone.close()
+                await self.hold(c, False)
                 async with asyncio.timeout(8):
-                    await self.notice(c, 'Report the consultation outcome accurately in the caller language. Attribute any colleague message and relay it faithfully. Offer another permitted destination only with caller confirmation. Do not retry this person automatically or use blind transfer.', {'outcome': outcome, 'message': text, 'colleague': c.recipient['recipient_id']})
+                    await self.notice(c, 'Report the consultation outcome accurately in the caller language. Attribute any colleague message and relay it faithfully. Offer another permitted destination only with caller confirmation. Do not retry this person automatically or use blind transfer.', {'outcome': outcome, 'failure_reason': c.failure_reason, 'message': text, 'colleague': c.recipient['recipient_id']})
             except Exception:
-                # An unavailable consultation never tears down the Receptionist.
-                try:
-                    await self.hold(c, False)
-                except Exception:
-                    pass
+                self.emit(c, 'recovery_failed', 'consultation_recovery_failed')
+                # A broken caller provider/media path cannot report the result.
+                # Take the configured native fallback now, not at call expiry.
+                await self.runtime.finish(c.caller, 'fallback', 'consultation_recovery_failed', fallback=True)
 
     async def cleanup(self, c):
         if c.cleanup_task is None:
@@ -444,7 +481,7 @@ class Consultations:
                 await asyncio.wait_for(self.client.close_attempt(c), 2)
             except Exception:
                 pass
-        if not c.releasing and not c.caller.terminal:
+        if not c.releasing and c.held and not c.caller.caller_left:
             try:
                 await asyncio.wait_for(self.hold(c, False), 3)
             except Exception:
@@ -466,6 +503,7 @@ class Consultations:
 
     async def private_ended(self, c, call):
         if c.phone and c.phone.private is call and c.state in ('phone','clarification') and not c.responses.full():
+            c.failure_reason = 'consultation_provider_failed'
             c.responses.put_nowait({'decision':'phone_closed'})
 
     async def event(self, event):
@@ -491,6 +529,8 @@ class Consultations:
                 c.answered.set()
             return True
         if kind in ('StasisEnd','ChannelDestroyed') and channel in self.channels:
+            if event.get('cause') == 17:
+                c.failure_reason = 'consultation_busy'
             if not c.responses.full():
                 c.responses.put_nowait({'decision':'phone_closed'})
             return True

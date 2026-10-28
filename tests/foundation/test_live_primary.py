@@ -118,3 +118,83 @@ async def test_signal_onset_ignores_silence_and_keeps_no_audio_after_close():
     assert sum(e['type'] == 'audio_signal' for e in session._queue._queue) == 1
     await session.close()
     assert session.audio.pending_bytes == 0 and not session._signal_remainder
+
+
+@pytest.mark.asyncio
+async def test_consultation_continues_tool_and_waits_for_pbx_speech_then_quiet():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from voice_agent.media import AudioBridge, AudioBuffer
+    from test_live import PrimaryLiveEmulator, TOOL
+    from test_provider_emulators import eventually
+
+    emulator = PrimaryLiveEmulator()
+    server = TestServer(emulator.app)
+    await server.start_server()
+    session = OpenAILiveWebSocketSession({'api_key': 'synthetic'})
+    session.ws_base = str(server.make_url('/v1/live/sessions')).replace('http:', 'ws:')
+    media = SimpleNamespace(input=AudioBuffer(), write=AsyncMock(), stop_input=lambda: None, flush=AsyncMock())
+    bridge = AudioBridge(media, session, lambda code: pytest.fail(code))
+    speech = None
+    try:
+        await session.start(snapshot('gpt-live-1')['conversation'], [TOOL])
+        await emulator.tool(next(iter(session._wire_tools)))
+        await eventually(lambda: 'c1' in session._invocations and session._responses['r1']['done'])
+        await session.send_result('c1', {'outcome': 'consulting'})
+        speech = asyncio.create_task(session.consultation_say('Check with the colleague, then pause.', response_id='r1'))
+        await eventually(lambda: any(e['type'] == 'session.commentary.append' for e in emulator.received))
+        commands = [e['type'] for e in emulator.received]
+        assert commands.index('response.item.create') < commands.index('response.create') < commands.index('session.commentary.append')
+        assert commands.count('response.create') == 1
+        # Acknowledged context, received audio and queued silence prove no playback.
+        for frame in (b'\xff' * 160, b'\x80' * 160, b'\xff' * 12800):
+            await emulator.ws.send_json({'type': 'session.output_audio.delta', 'delta': base64.b64encode(frame).decode()})
+        await eventually(lambda: session.audio.pending_bytes == 13120)
+        assert not speech.done()
+        bridge.start()
+        await asyncio.wait_for(speech, 2)
+        # Continuous silent output need not stop or empty its queue to complete.
+        assert session.audio.pending_bytes > 0
+        assert media.write.await_count >= 52
+    finally:
+        if speech:
+            speech.cancel()
+            await asyncio.gather(speech, return_exceptions=True)
+        await bridge.stop()
+        await session.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_consultation_ack_is_correlated_and_close_wakes_playback_wait():
+    from unittest.mock import AsyncMock
+    session = OpenAILiveWebSocketSession({'api_key': 'synthetic'})
+    session._send = AsyncMock()
+    task = asyncio.create_task(session.consultation_say('Check with the colleague.'))
+    try:
+        await asyncio.sleep(0)
+        command = session._send.await_args.args[0]
+        await session._handle({'type': 'session.commentary.appended', 'client_event_id': 'foreign'})
+        assert not task.done() and not session._acks[command['event_id']][1].done()
+        await session._handle({'type': 'session.commentary.appended', 'client_event_id': command['event_id']})
+        await asyncio.sleep(0)
+        assert not task.done()  # Ack is not a spoken announcement.
+        session._closed_event.set()
+        with pytest.raises(ProviderError, match='provider_disconnected'):
+            await asyncio.wait_for(task, .5)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_consultation_rejected_append_fails_without_waiting_for_speech():
+    from unittest.mock import AsyncMock
+    session = OpenAILiveWebSocketSession({'api_key': 'synthetic'})
+    session._send = AsyncMock()
+    task = asyncio.create_task(session.consultation_say('Check with the colleague.'))
+    await asyncio.sleep(0)
+    command = session._send.await_args.args[0]
+    await session._handle({'type': 'error', 'error': {'client_event_id': command['event_id'], 'message': 'PRIVATE'}})
+    with pytest.raises(ProviderError, match='command rejected'):
+        await asyncio.wait_for(task, .5)

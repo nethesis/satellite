@@ -34,7 +34,7 @@ def publication(role='public'):
 
 def recipient(**changes):
     return dict(version=1, recipient_id='alice', mainextension='203',
-        effective_presence='online', device_state='online', chat_allowed=True,
+        effective_presence='online', device_state='0', chat_allowed=True,
         observed_at=datetime.now(timezone.utc).isoformat(), **changes)
 
 
@@ -539,3 +539,106 @@ async def test_late_private_sip_origination_is_reaped_after_consultation_cancel(
         assert private.terminal and private.session_id not in runtime.calls
     finally:
         release.set();await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['announcement','moh','origination','provider'])
+async def test_stage_failure_restores_caller_and_reports_safe_reason(stage):
+    runtime,storage,controller,call,client=await prepared()
+    coordinator=runtime.consultations
+    controller.continue_channel.reset_mock()
+    reports=[]
+    async def say(instruction, data=None, **kwargs):
+        if data is None and stage=='announcement':
+            raise TimeoutError('PRIVATE PROVIDER ERROR')
+        if data is not None:reports.append(data)
+    call.adapter.consultation_say.side_effect=say
+    async def moh(channel, enabled):
+        if enabled and stage=='moh':raise RuntimeError('PRIVATE ARI ERROR')
+    controller.moh.side_effect=moh
+    class FailedPhone(Phone):
+        async def ring(self,*args):
+            self.c.stage=stage
+            raise RuntimeError('PRIVATE ORIGINATION ERROR')
+    coordinator.phone_factory=FailedPhone
+    try:
+        await coordinator.start(call,'extension:203','reason')
+        c=call.consultation
+        await coordinator.begin(call,response_id='transfer-response')
+        await asyncio.wait_for(c.task,1)
+        expected='consultation_'+stage+('_timeout' if stage=='announcement' else '_failed')
+        assert reports[0]['failure_reason']==expected
+        assert not call.terminal and call.consultation is None and not coordinator.recipients
+        controller.continue_channel.assert_not_awaited()
+        if stage in ('announcement','moh'):controller.originate_consult.assert_not_awaited()
+        if stage!='announcement':
+            controller.moh.assert_awaited_with(call.caller_id,False)
+            controller.add_to_bridge.assert_awaited_with(call.bridge_id,[call.caller_id])
+        events=list(runtime.monitoring.pending.values())
+        assert any(e['error_code']==expected and e['event_type'].startswith('consultation_') for e in events)
+        assert 'PRIVATE' not in json.dumps(events)
+    finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_failed_caller_recovery_takes_native_fallback_before_call_deadline():
+    runtime,storage,controller,call,client=await prepared(phone=False)
+    call.adapter.consultation_say.side_effect=RuntimeError('provider unavailable')
+    controller.continue_channel.reset_mock()
+    try:
+        await runtime.consultations.start(call,'extension:203','reason')
+        c=call.consultation;await runtime.consultations.begin(call)
+        await asyncio.wait_for(c.task,1)
+        assert call.terminal and not runtime.calls and not runtime.consultations.recipients
+        controller.continue_channel.assert_awaited_once()
+        assert any(e['error_code']=='consultation_recovery_failed' and e['outcome']=='fallback' for e in runtime.monitoring.pending.values())
+    finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.asyncio
+async def test_caller_hangup_on_hold_stops_music_and_closes_owned_phone():
+    runtime,storage,controller,call,client=await prepared()
+    coordinator=runtime.consultations
+    ringing=asyncio.Event()
+    class WaitingPhone(Phone):
+        async def ring(self,*args):
+            ringing.set();await asyncio.Event().wait()
+    coordinator.phone_factory=WaitingPhone
+    try:
+        await coordinator.start(call,'extension:203','reason')
+        c=call.consultation;await coordinator.begin(call)
+        await asyncio.wait_for(ringing.wait(),1)
+        phone=c.phone
+        assert c.held
+        await asyncio.wait_for(runtime.finish(call,'completed'),1)
+        assert call.terminal and not c.held and not coordinator.channels and not coordinator.recipients
+        phone.close.assert_awaited()
+        controller.moh.assert_awaited_with(call.caller_id,False)
+    finally:await runtime.finish(call,'completed')
+
+
+@pytest.mark.parametrize('presence,state,expected', [
+    ('online','0',True),('online','online',False),('online','1',False),
+    ('online','8',False),('dnd','0',False),('busy','1',False),
+    ('ringing','8',False),('offline','4',False),('unknown','0',False),
+])
+def test_native_asterisk_presence_only_rings_idle_main_extension(presence,state,expected):
+    assert Consultations.can_ring({'effective_presence':presence,'device_state':state}) is expected
+
+
+@pytest.mark.asyncio
+async def test_failed_moh_stop_falls_back_and_retries_cleanup():
+    runtime,storage,controller,call,client=await prepared(phone=False)
+    async def moh(channel,enabled):
+        if not enabled:raise RuntimeError('ARI stop failed')
+    controller.moh.side_effect=moh
+    controller.continue_channel.reset_mock()
+    try:
+        await runtime.consultations.start(call,'extension:203','reason')
+        c=call.consultation;await runtime.consultations.begin(call)
+        await asyncio.wait_for(c.task,1)
+        assert call.terminal and not runtime.consultations.recipients
+        controller.continue_channel.assert_awaited_once()
+        # Native fallback also contains StopMusicOnHold for failed ARI deletion.
+        assert sum(args.args[1] is False for args in controller.moh.await_args_list)>=2
+    finally:await runtime.finish(call,'completed')

@@ -261,3 +261,23 @@ provider/callback tests**; UI type/lint/format checks, **seven UI unit tests**, 
 production build and browser regressions. Repeated installation preserves native
 IVR data, drafts, credentials, immutable publications and the canonical catalog.
 No commit, push, deployment or real provider calls were performed for this removal.
+
+### Attended announcement and failure recovery regression
+
+The attended tool now continues the Live backend after submitting its result,
+then waits for speech followed by one second of quiet at the paced PBX media
+writer. Context acknowledgements remain correlated by client event ID and do
+not count as speech. Continuous silent Live frames do not require an empty
+queue. This is an audio activity boundary, not verification of spoken wording;
+real listening remains an acceptance gate.
+
+Announcement, native hold, recipient lookup, origination and private provider
+failures carry bounded stage codes. Recovery stops the private leg and native
+music before reporting the result. A failed caller recovery immediately uses
+the configured native fallback. Caller-session termination also stops owned
+hold music. The native recipient contract uses Asterisk hint state `0` for an
+idle phone; friendly presence labels are not substituted for that state.
+
+Local verification: 357 paired database/runtime tests, 79 focused tests and nine
+transcription regressions passed. These checks do not establish real ringing,
+audible music, private assistant audio, consent or a two-way human conversation.

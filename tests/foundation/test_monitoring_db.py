@@ -14,7 +14,7 @@ def test_idempotent_projection_and_hourly_histograms(monkeypatch):
     import mysql.connector
     import voice_agent.storage as module
     from voice_agent.telemetry import CallTrace
-    from voice_agent.monitoring import Monitoring
+    from voice_agent.monitoring import Monitoring, EVENTS
     from voice_agent.runtime import Call
     @contextmanager
     def database(role):
@@ -41,6 +41,9 @@ def test_idempotent_projection_and_hourly_histograms(monkeypatch):
     trace.usage({'scope':'latest_provider_response','input_tokens':12,'output_tokens':4},'synthetic-response')
     details = trace.finish()
     monitor.emit(call.run_id,'completed',outcome='completed',**details)
+    for kind in EVENTS:
+        if kind.startswith('consultation_'):
+            monitor.emit(call.run_id,kind,error='consultation_announcement_timeout')
     for event in monitor.pending.values():
         storage.event(event)
         storage.event(event)
@@ -54,6 +57,10 @@ def test_idempotent_projection_and_hourly_histograms(monkeypatch):
         assert cursor.fetchone()['samples']==1
         cursor.execute('SELECT COUNT(*) count FROM asteriskcdrdb.voice_agent_run_events WHERE run_id=%s',(call.run_id,))
         assert cursor.fetchone()['count']==len(monitor.pending)
+        cursor.execute("SELECT event_type,error_code FROM asteriskcdrdb.voice_agent_run_events WHERE run_id=%s AND event_type LIKE 'consultation_%%'",(call.run_id,))
+        consultation_events=cursor.fetchall()
+        assert {row['event_type'] for row in consultation_events}=={kind for kind in EVENTS if kind.startswith('consultation_')}
+        assert {row['error_code'] for row in consultation_events}=={'consultation_announcement_timeout'}
         # A DB failure after event insertion must roll back the event and rollup together.
         cursor.execute("CREATE TRIGGER asteriskcdrdb.synthetic_metric_failure BEFORE INSERT ON asteriskcdrdb.voice_agent_metric_hours FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='synthetic failure'")
     event={'event_id':str(uuid.uuid4()),'run_id':call.run_id,'event_type':'trace_finished','outcome':None,
