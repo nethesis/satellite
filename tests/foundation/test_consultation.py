@@ -793,6 +793,7 @@ async def test_voicemail_requires_explicit_confirmation_and_commits_only_matchin
         task=asyncio.create_task(registry.invoke('confirmed','nv_consultation_voicemail_v1',{'offer_ref':ref,'confirmed':True}))
         await transfer_started(controller)
         assert controller.continue_channel.await_args.args[1]=={'context':'voice-agent-voicemail','extension':'203','priority':1}
+        controller.set_variable.assert_any_await(call.caller_id,'AGENT_SESSION_ID',call.session_id)
         controller.originate_consult.assert_not_awaited()
         await runtime.event({'type':'StasisEnd','channel':{'id':call.caller_id}})
         body={'token':call.transfer_token,'destination_id':'extension:203'}
