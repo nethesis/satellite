@@ -863,8 +863,9 @@ class TestMetricsEndpoint:
         assert _metric(text, "satellite_ai_calls_total", provider="deepgram", operation="tts", result="failure") == "1"
         assert _metric(text, "satellite_ai_credit_exhausted", provider="deepgram") == "1"
 
-    @patch("api.subprocess.run")
-    def test_call_processor_metrics_are_merged(self, mock_run, client):
+    @pytest.mark.asyncio
+    @patch("api._run_worker", new_callable=AsyncMock)
+    async def test_call_processor_metrics_are_merged(self, mock_run, client):
         import api
         child = {
             "ok": False,
@@ -876,7 +877,7 @@ class TestMetricsEndpoint:
         mock_run.return_value = Mock(returncode=1, stdout=json.dumps(child).encode(), stderr=b"")
 
         with pytest.raises(RuntimeError):
-            api._run_call_processor(transcript_id=1, raw_transcription="hi", summary=True)
+            await api._run_call_processor(transcript_id=1, raw_transcription="hi", summary=True)
 
         text = client.get("/metrics").text
         assert _metric(text, "satellite_ai_calls_total", provider="openai", operation="clean", result="failure") == "1"
