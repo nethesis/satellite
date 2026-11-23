@@ -12,10 +12,11 @@ from pathlib import Path
 import re
 import runpy
 import time
+from types import SimpleNamespace
 
 from voice_agent import runtime
 from voice_agent.providers import create_adapter
-from .live_startup import DiagnosticLiveAdapter
+from .live_startup import DiagnosticLiveAdapter, DiagnosticWebSocketSession
 
 
 ROOT = Path('/var/lib/voice-agent')
@@ -63,58 +64,39 @@ def record_result(label, measurements):
     path.replace(result_path)
 
 
-class RecordedAdapter(DiagnosticLiveAdapter):
-    def __init__(self, binding, selection):
-        super().__init__(binding, variant=selection['variant'])
-        self.label = selection['label']
-
-    async def close(self):
-        try:
-            await super().close()
-        finally:
-            record_result(self.label, self.measurements())
-
-
 def factory(binding):
     selection = _selection.get()
-    if selection and binding.get('provider') == 'openai' and binding.get('adapter') == 'live':
-        if selection['variant'] == 'primary-ws':
-            from .primary_bridge import PrimaryBridgeAdapter
-            owner = selection['_runtime']
-            return PrimaryBridgeAdapter(binding, selection['_call'], owner.controller, owner.storage,
-                record=lambda data: record_result(selection['label'], data))
-        return RecordedAdapter(binding, selection)
+    if selection and binding['provider'] == 'openai':
+        variant = selection['variant']
+        if binding['adapter'] == 'live_ws' and variant == 'primary-ws':
+            adapter = DiagnosticWebSocketSession
+        elif binding['adapter'] == 'live' and variant in ('current', 'concise'):
+            adapter = DiagnosticLiveAdapter
+        else:
+            raise ValueError('diagnostic_transport_mismatch')
+        return adapter(binding, variant=variant, on_close=lambda data: record_result(selection['label'], data))
     return create_adapter(binding)
 
 
 class ScopedRuntime(runtime.Runtime):
     def __init__(self, storage, controller, adapter_factory=factory):
         super().__init__(storage, controller, adapter_factory=adapter_factory)
-        original_originate = controller.originate_local
 
-        async def originate(session_id, channel_id, variables):
-            call = self.calls.get(session_id)
-            selection = read_selection(call) if call else None
-            if selection and selection['variant'] == 'primary-ws':
-                await controller.request('POST', '/channels/externalMedia', params={
-                    'app': controller.app, 'channelId': channel_id, 'data': 'provider,' + session_id,
-                    'external_host': 'INCOMING', 'connection_type': 'server', 'format': 'ulaw',
-                    'transport': 'websocket', 'encapsulation': 'none', 'transport_data': 'f(json)'},
-                    json_body={'variables': variables})
-                self.spawn(self.converse(call), call)
-                return
-            return await original_originate(session_id, channel_id, variables)
-
-        controller.originate_local = originate
+    def live_transport(self, caller_id, linkedid, snapshot):
+        selection = read_selection(SimpleNamespace(caller_id=caller_id, linkedid=linkedid, snapshot=snapshot))
+        if selection and selection['variant'] in ('current', 'concise'):
+            return 'live'  # The two sideband comparisons require SIP and its signed webhook.
+        return super().live_transport(caller_id, linkedid, snapshot)
 
     async def converse(self, call):
         selection = read_selection(call)
-        if re.fullmatch(r'va[a-f0-9]{28}', call.caller_id) and selection is None:
+        owner = call.private_consultation.caller if call.private_consultation else call
+        if re.fullmatch(r'va[a-f0-9]{28}', owner.caller_id) and selection is None:
             # Never let a mistimed/mismatched synthetic arm fall through to
             # ordinary transcript retention or an unmeasured provider session.
             await self.finish(call, 'interrupted', 'provider_unavailable', fallback=False)
             return
-        token = _selection.set({**selection, '_call': call, '_runtime': self} if selection else None)
+        token = _selection.set(selection)
         try:
             await super().converse(call)
         finally:

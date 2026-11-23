@@ -50,6 +50,54 @@ async def test_transcription_pipeline_starts_and_cleans_up(resources):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_owner", [False, True])
+async def test_slow_transcription_finalizer_releases_resources_before_mqtt_shutdown(resources, monkeypatch, cancel_owner):
+    from types import SimpleNamespace
+    from asterisk_bridge import AsteriskBridge
+    from deepgram_connector import DeepgramConnector
+
+    stop, finalizing = asyncio.Event(), asyncio.Event()
+    rtp, mqtt, _ = resources
+    bridge = AsteriskBridge("http://ari", "test", "user", "pass", mqtt, rtp)
+    connector = DeepgramConnector("synthetic", None, None, mqtt, "call")
+    connector.complete_call = [{"speaker_name": "caller", "transcription": "final words"}]
+
+    async def stuck_finalize():
+        finalizing.set()
+        await asyncio.Event().wait()
+
+    connector.dg_connection = SimpleNamespace(finalize=stuck_finalize, _socket=AsyncMock())
+    bridge.channels["caller"] = {"connector": connector, "snoop_channel_in": "snoop"}
+    bridge.connect = AsyncMock(side_effect=stop.set)
+    bridge._ari_request = AsyncMock()
+    bridge.session, bridge.ws = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(transcription, "AsteriskBridge", lambda **kwargs: bridge)
+    monkeypatch.setattr("deepgram_connector.CLOSE_IO_TIMEOUT", 0.03)
+    # Reproduce a provider operation lasting longer than the old ten-second outer deadline.
+    timeout = asyncio.timeout
+    monkeypatch.setattr(asyncio, "timeout", lambda seconds: timeout(0.01 if seconds == 10 else seconds))
+
+    async def close_mqtt():
+        mqtt.publish.assert_awaited_once()
+        connector.dg_connection._socket.close.assert_awaited_once()
+        bridge._ari_request.assert_awaited_once_with("DELETE", "/channels/snoop")
+        bridge.session.close.assert_awaited_once()
+        assert not bridge._closing_channels
+
+    mqtt.disconnect.side_effect = close_mqtt
+    task = asyncio.create_task(transcription.run(stop))
+    await asyncio.wait_for(finalizing.wait(), 1)
+    if cancel_owner:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+    else:
+        await asyncio.wait_for(task, 2)
+    mqtt.disconnect.assert_awaited_once()
+    await close_mqtt()
+
+
+@pytest.mark.asyncio
 async def test_stop_interrupts_mqtt_startup_and_cleans_partial_resources(resources):
     stop, connecting = asyncio.Event(), asyncio.Event()
     rtp, mqtt, ari = resources

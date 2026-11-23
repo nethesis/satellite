@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import time
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -109,6 +110,35 @@ async def test_signed_webhook_requires_live_pinned_pending_call_and_deduplicates
 
 
 @pytest.mark.asyncio
+async def test_correlated_webhook_returns_retryable_http_error_and_starts_once():
+    from httpx import ASGITransport, AsyncClient
+    from voice_agent.storage import ClaimRejected
+    runtime, storage, controller, snapshot = fixtures()
+    call = await admit(runtime)
+    runtime.converse = AsyncMock()
+    data = {'call_id': 'provider-call', 'sip_headers': [
+        {'name': 'X-OS-Session-ID', 'value': call.session_id},
+        {'name': 'X-OS-Provider-Leg-ID', 'value': call.leg_id},
+        {'name': 'X-OS-Agent-ID', 'value': call.snapshot['agent_id']}]}
+    raw, headers = sign(call, data)
+    storage.accept.side_effect = [ClaimRejected(), TimeoutError(), None]
+    app = create_app('token', runtime)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://local') as client:
+            async def deliver():
+                return await client.post('/satellite-webhooks/openai', content=raw, headers=headers)
+            assert (await deliver()).json() == {'status': 'ignored'}
+            assert (await deliver()).status_code == 503
+            assert call.provider_call_id is None
+            assert (await deliver()).json() == {'status': 'accepted'}
+            assert (await deliver()).json() == {'status': 'duplicate'}
+        await asyncio.sleep(0)
+        runtime.converse.assert_awaited_once_with(call)
+    finally:
+        await runtime.finish(call, 'completed')
+
+
+@pytest.mark.asyncio
 async def test_transfer_waits_for_confirmed_ari_release():
     runtime, storage, controller, snapshot = fixtures()
     call = await admit(runtime)
@@ -166,16 +196,254 @@ async def test_unconfirmed_released_channel_is_hung_up_instead_of_continued():
 
 
 @pytest.mark.asyncio
+async def test_disconnect_preserves_confirmed_transfer_while_continue_is_in_flight():
+    runtime, _, controller, _ = fixtures()
+    call = await admit(runtime)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def pending_continue(*args):
+        entered.set()
+        await release.wait()
+
+    controller.continue_channel.side_effect = pending_continue
+    transfer = asyncio.create_task(Transfer(runtime, call).transfer('extension:203'))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await runtime.event({'type': 'StasisEnd', 'channel': {'id': call.caller_id}})
+        await runtime.event({'type': 'ChannelUserevent', 'eventname': 'VoiceAgentTransfer',
+                             'channel': {'id': call.caller_id}, 'userevent': {
+                                 'token': call.transfer_token, 'destination_id': 'extension:203'}})
+        await runtime.disconnected()
+        controller.hangup.assert_awaited_once_with(call.leg_id)
+        assert controller.continue_channel.await_count == 1
+        assert any(e['event_type'] == 'completed' and e['outcome'] == 'transferred'
+                   for e in runtime.monitoring.queue._queue)
+    finally:
+        release.set()
+        await transfer
+
+
+@pytest.mark.asyncio
+async def test_event_socket_drop_allows_runtime_cleanup_over_http():
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+    from voice_agent.ari import AriController
+
+    runtime, _, _, _ = fixtures()
+    call = await admit(runtime)
+    call.bridge_id = 'sip-bridge'
+    requests = []
+    cleaned = asyncio.Event()
+
+    async def drop_events(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close()
+        return ws
+
+    async def rest(request):
+        requests.append((request.method, request.path))
+        if request.method == 'GET':
+            return web.json_response([])
+        return web.Response(status=204)
+
+    app = web.Application()
+    app.router.add_get('/ari/events', drop_events)
+    app.router.add_route('*', '/ari/{path:.*}', rest)
+    async with TestServer(app) as server:
+        controller = AriController(str(server.make_url('/')), 'user', 'test', on_event=runtime.event)
+        runtime.controller = controller
+
+        async def disconnected():
+            assert not controller.connected
+            await runtime.disconnected()
+            cleaned.set()
+
+        controller.on_disconnect = disconnected
+        await controller.start()
+        try:
+            await asyncio.wait_for(cleaned.wait(), 2)
+        finally:
+            await controller.stop()
+    assert ('POST', f'/ari/channels/{call.caller_id}/continue') in requests
+    assert ('DELETE', f'/ari/channels/{call.leg_id}') in requests
+    assert ('DELETE', '/ari/bridges/sip-bridge') in requests
+
+
+@pytest.mark.asyncio
+async def test_reconnect_removes_only_empty_sip_bridges_with_persisted_owners():
+    runtime, storage, controller, _ = fixtures()
+    call = await admit(runtime)
+    call.bridge_id = 'sip-' + call.session_id
+    controller.destroy_bridge.side_effect = ConnectionError()
+    await runtime.disconnected()
+    assert not runtime.calls
+    controller.destroy_bridge.reset_mock(side_effect=True)
+    storage.media_ownership.return_value = {}
+    storage.consultation_ownership.return_value = {call.session_id, 'occupied'}
+    controller.list_channels.return_value = []
+    controller.list_bridges.return_value = [
+        {'id': call.bridge_id, 'channels': []},
+        {'id': 'sip-occupied', 'channels': ['channel']},
+        {'id': 'sip-foreign', 'channels': []}]
+    await runtime.event({'type': 'AgentAriConnected'})
+    controller.destroy_bridge.assert_awaited_once_with(call.bridge_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stopping', [True, False], ids=['shutdown', 'event_stream_drop'])
+async def test_lifecycle_waits_for_pre_registration_admission(stopping):
+    runtime, storage, controller, _ = fixtures()
+    runtime.monitoring.stop = AsyncMock()
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def delayed_commit(call):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(3)
+
+    storage.admit.side_effect = delayed_commit
+    await runtime.event({'type': 'StasisStart', 'args': ['caller', 'basic_voice'], 'channel': {
+        'id': 'caller', 'dialplan': {'context': 'voice-agent-basic_voice'}}})
+    await asyncio.wait_for(entered.wait(), 2)
+    if not stopping:
+        controller.connected = False
+    teardown = asyncio.create_task(runtime.stop() if stopping else runtime.disconnected())
+    try:
+        await asyncio.sleep(0)
+        assert not teardown.done()
+        assert not runtime.calls
+    finally:
+        release.set()
+        await asyncio.wait_for(teardown, 2)
+    assert not runtime.calls and not runtime.admissions
+    controller.originate_local.assert_not_awaited()
+    controller.continue_channel.assert_awaited_once()
+    assert controller.continue_channel.await_args.args[1]['context'].startswith('voice-agent-fallback-')
+    assert any(e['outcome'] == 'interrupted' for e in runtime.monitoring.queue._queue)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_unregistered_finalizer_after_caller_leaves():
+    runtime, storage, controller, _ = fixtures()
+    started, release = asyncio.Event(), asyncio.Event()
+    storage.admit.side_effect = RuntimeError('storage_unavailable')
+    async def fallback(*args):
+        started.set()
+        await release.wait()
+    controller.continue_channel.side_effect = fallback
+    await runtime.event({'type': 'StasisStart', 'args': ['caller', 'basic_voice'], 'channel': {
+        'id': 'caller', 'dialplan': {'context': 'voice-agent-basic_voice'}}})
+    admission = runtime.admissions['caller']
+    await asyncio.wait_for(started.wait(), 2)
+    await runtime.event({'type': 'ChannelDestroyed', 'channel': {'id': 'caller'}})
+    await asyncio.gather(admission, return_exceptions=True)
+    assert not runtime.admissions and not runtime.calls
+    stopping = asyncio.create_task(runtime.stop())
+    try:
+        await asyncio.sleep(0)
+        assert not stopping.done()
+        controller.stop.assert_not_awaited()
+    finally:
+        release.set()
+        await asyncio.wait_for(stopping, 2)
+    controller.hangup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_joins_in_progress_deadline_cleanup():
+    runtime, _, controller, _ = fixtures()
+    call = await admit(runtime)
+    call.bridge_id = 'owned-bridge'
+    call.adapter = AsyncMock()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def fallback(*args):
+        entered.set()
+        await release.wait()
+
+    controller.continue_channel.side_effect = fallback
+    runtime.monitoring.stop = AsyncMock()
+    deadline = runtime.spawn(runtime.deadline(call, 0), call)
+    await asyncio.wait_for(entered.wait(), 2)
+    stopping = asyncio.create_task(runtime.stop())
+    try:
+        # Even cancellation of the originating worker cannot abort its finalizer.
+        deadline.cancel()
+        await asyncio.gather(deadline, return_exceptions=True)
+        controller.stop.assert_not_awaited()
+    finally:
+        release.set()
+        await asyncio.wait_for(stopping, 2)
+    assert not runtime.calls
+    controller.destroy_bridge.assert_awaited_once_with(call.bridge_id)
+    call.adapter.close.assert_awaited_once()
+    assert any(e['event_type'] == 'fallback' and e['error_code'] == 'duration_exceeded'
+               for e in runtime.monitoring.queue._queue)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('resource', ['leg', 'bridge'])
+@pytest.mark.parametrize('lifecycle', ['stop', 'disconnected'])
+async def test_hangup_reaps_sip_resource_before_shutdown_or_reconnect(resource, lifecycle):
+    runtime, _, controller, _ = fixtures()
+    entered, release, early_delete = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    history = []
+
+    async def create(*args):
+        entered.set()
+        await release.wait()
+        history.append('created')
+
+    async def delete(identifier):
+        history.append('deleted')
+        early_delete.set()
+
+    if resource == 'leg':
+        controller.originate_local.side_effect = create
+        controller.hangup.side_effect = delete
+    else:
+        controller.create_bridge.side_effect = create
+        controller.destroy_bridge.side_effect = delete
+    runtime.monitoring.stop = AsyncMock()
+    await runtime.event({'type': 'StasisStart', 'args': ['caller', 'basic_voice'], 'channel': {
+        'id': 'caller', 'dialplan': {'context': 'voice-agent-basic_voice'}}})
+    if resource == 'bridge':
+        await asyncio.wait_for(runtime.admissions['caller'], 2)
+        call = next(iter(runtime.calls.values()))
+        call.provider_answered.set()
+        runtime.adapter_factory.return_value = AsyncMock()
+        runtime.spawn(runtime.converse(call), call)
+    await asyncio.wait_for(entered.wait(), 2)
+    await runtime.event({'type': 'StasisEnd', 'channel': {'id': 'caller'}})
+    await asyncio.wait_for(early_delete.wait(), 2)
+    stopping = asyncio.create_task(getattr(runtime, lifecycle)())
+    try:
+        async with asyncio.timeout(2):
+            while runtime.tasks:
+                await asyncio.sleep(0)
+        assert not stopping.done()
+        controller.stop.assert_not_awaited()
+    finally:
+        release.set()
+        await asyncio.wait_for(stopping, 2)
+    assert history == ['deleted', 'created', 'deleted']
+    if resource == 'bridge':
+        controller.create_bridge.assert_awaited_once_with('sip-' + call.session_id)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_transfer_schedules_safe_cleanup():
     runtime, storage, controller, snapshot = fixtures()
     call = await admit(runtime)
     transfer = asyncio.create_task(Transfer(runtime,call).transfer('extension:203'))
-    await asyncio.sleep(0)
+    await transfer_started(controller)
     transfer.cancel()
     await asyncio.gather(transfer,return_exceptions=True)
-    await asyncio.gather(*list(runtime.tasks),return_exceptions=True)
+    await asyncio.wait_for(asyncio.gather(*list(runtime.tasks),return_exceptions=True), 2)
     assert call.terminal
-    controller.continue_channel.assert_awaited()
+    assert controller.continue_channel.await_args.args[1]['context'].startswith('voice-agent-fallback-')
 
 
 @pytest.mark.asyncio

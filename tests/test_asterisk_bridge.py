@@ -87,3 +87,50 @@ async def test_cleanup_removes_only_transcription_media_and_is_idempotent():
     assert not bridge.channels
     deleted = {call.args[1] for call in bridge._ari_request.await_args_list}
     assert deleted == {'/channels/owned-snoop', '/channels/owned-media', '/bridges/owned-bridge'}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["ari", "mqtt"])
+async def test_disconnect_drains_transcription_cleanup(source):
+    bridge = AsteriskBridge('http://ari.local', 'satellite', 'user', 'pass', AsyncMock(), AsyncMock())
+    bridge.session = AsyncMock()
+    bridge._ari_request = AsyncMock()
+    closing = asyncio.Event()
+    finalize = asyncio.Event()
+
+    async def close():
+        closing.set()
+        await finalize.wait()
+        await bridge.mqtt_client.publish("final", "transcript")
+
+    connector = AsyncMock()
+    connector.close.side_effect = close
+    bridge.channels['caller'] = {
+        'snoop_channel_in': 'snoop', 'bridge_in': 'bridge', 'connector': connector,
+    }
+    if source == "ari":
+        owner = asyncio.create_task(bridge._handle_ari_event({
+            'type': 'ChannelLeftBridge', 'channel': {'id': 'snoop'}}))
+        bridge._event_task = owner
+    else:
+        owner = asyncio.create_task(bridge.stop_transcription('caller'))
+    await asyncio.wait_for(closing.wait(), 1)
+    if source == "mqtt":
+        owner.cancel()
+
+    async def close_session():
+        bridge.mqtt_client.publish.assert_awaited_once_with("final", "transcript")
+
+    bridge.session.close.side_effect = close_session
+    shutdown = asyncio.create_task(bridge.disconnect())
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(owner, 1)
+        bridge.session.close.assert_not_awaited()
+    finally:
+        finalize.set()
+        await asyncio.wait_for(shutdown, 1)
+    assert [call.args for call in bridge._ari_request.await_args_list] == [
+        ('DELETE', '/bridges/bridge'), ('DELETE', '/channels/snoop')]
+    connector.close.assert_awaited_once()
+    bridge.session.close.assert_awaited_once()

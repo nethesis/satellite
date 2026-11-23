@@ -3,6 +3,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse, StreamingResponse
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 import re
 import uuid
 import json
@@ -189,23 +190,33 @@ def _iter_bytes(data: bytes, *, chunk_size: int):
         yield data[i : i + chunk_size]
 
 
+async def _finish_thread_call(func, *args, **kwargs):
+    # Cleanup must wait for in-flight file or database operations even on cancellation.
+    task = asyncio.create_task(run_in_threadpool(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
+def _stage_tts_chunks(directory, chunks):
+    with (directory / "inputs.txt").open("w", encoding="utf-8") as manifest:
+        for index, chunk in enumerate(chunks, start=1):
+            filename = f"chunk_{index:04d}.mp3"
+            (directory / filename).write_bytes(chunk)
+            manifest.write(f"file '{filename}'\n")
+
+
 async def _concat_and_boost_mp3_ffmpeg(chunks: list[bytes], gain: float = 8.0) -> bytes:
-    ffmpeg_path = shutil.which("ffmpeg")
+    ffmpeg_path = await run_in_threadpool(shutil.which, "ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg is not installed or not available in PATH")
 
-    with tempfile.TemporaryDirectory(prefix="satellite-tts-") as temp_dir:
-        concat_file_path = os.path.join(temp_dir, "inputs.txt")
-        output_path = os.path.join(temp_dir, "output.mp3")
-
-        with open(concat_file_path, "w", encoding="utf-8") as concat_file:
-            for index, chunk in enumerate(chunks, start=1):
-                chunk_filename = f"chunk_{index:04d}.mp3"
-                chunk_path = os.path.join(temp_dir, chunk_filename)
-                with open(chunk_path, "wb") as chunk_file:
-                    chunk_file.write(chunk)
-                concat_file.write(f"file '{chunk_filename}'\n")
-
+    temp_dir = await run_in_threadpool(tempfile.TemporaryDirectory, prefix="satellite-tts-")
+    directory = Path(temp_dir.name)
+    try:
+        await _finish_thread_call(_stage_tts_chunks, directory, chunks)
         proc = await _run_worker(
             [
                 ffmpeg_path,
@@ -223,15 +234,16 @@ async def _concat_and_boost_mp3_ffmpeg(chunks: list[bytes], gain: float = 8.0) -
                 "-y",
                 "output.mp3",
             ],
-            cwd=temp_dir,
+            cwd=directory,
         )
 
         if proc.returncode != 0:
             stderr_preview = (proc.stderr or b"")[:2000].decode("utf-8", errors="replace")
             raise RuntimeError(f"ffmpeg failed rc={proc.returncode} stderr={stderr_preview!r}")
 
-        with open(output_path, "rb") as output_file:
-            return output_file.read()
+        return await _finish_thread_call((directory / "output.mp3").read_bytes)
+    finally:
+        await _finish_thread_call(temp_dir.cleanup)
 
 
 def _tts_chunk_to_bytes_sync(text: str, options: SpeakOptions) -> bytes:
@@ -737,19 +749,21 @@ async def get_transcription(
     if os.getenv("OPENAI_API_KEY") and transcript_id is not None and raw_transcription:
         try:
             did_enrichment = True
-            await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="summarizing")
+            await _finish_thread_call(db.set_transcript_state, transcript_id=transcript_id, state="summarizing")
             await _run_call_processor(
                 transcript_id=transcript_id,
                 raw_transcription=raw_transcription,
                 summary=summary,
             )
-            await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="done")
-        except Exception:
+            await _finish_thread_call(db.set_transcript_state, transcript_id=transcript_id, state="done")
+        except (asyncio.CancelledError, Exception) as exc:
             logger.exception("Failed to process call transcript")
             try:
                 await run_in_threadpool(db.set_transcript_state, transcript_id=transcript_id, state="failed")
             except Exception:
                 logger.exception("Failed to update transcript state=failed")
+            if isinstance(exc, asyncio.CancelledError):
+                raise
 
     # If we persisted but didn't run enrichment, the pipeline is complete after raw transcript is stored.
     if transcript_id is not None and not did_enrichment:

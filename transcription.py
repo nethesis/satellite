@@ -71,11 +71,17 @@ async def run(shutdown_event):
             startup.cancel()
             stopping.cancel()
             await asyncio.gather(startup, stopping, return_exceptions=True)
-            for close in (bridge.disconnect, rtp.stop, mqtt.disconnect):
-                try:
-                    async with asyncio.timeout(10):
-                        await close()
-                except Exception:
-                    logger.exception("Transcription cleanup failed")
+            try:
+                # The bridge bounds individual I/O operations so each resource gets a cleanup attempt.
+                await bridge.disconnect()
+            except Exception:
+                logger.exception("Transcription bridge cleanup failed")
+            finally:
+                for close in (rtp.stop, mqtt.disconnect):
+                    try:
+                        async with asyncio.timeout(10):
+                            await close()
+                    except Exception:
+                        logger.exception("Transcription cleanup failed")
         if not shutdown_event.is_set():
             await asyncio.sleep(5)

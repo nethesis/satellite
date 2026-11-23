@@ -122,7 +122,7 @@ async def probe(variant, expected_snapshot, speech):
     result = ROOT / ('live-diagnostic-result-' + label + '.json')
     # ARI can remove the last channel before asynchronous provider close and
     # monitoring flush finish. Wait for that result rather than losing evidence.
-    result_deadline = time.monotonic() + 5
+    result_deadline = time.monotonic() + (20 if variant == 'primary-ws' else 5)
     while not result.exists() and time.monotonic() < result_deadline:
         await asyncio.sleep(.05)
     if result.exists():

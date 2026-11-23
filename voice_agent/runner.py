@@ -55,6 +55,8 @@ def create_app(token: str, runtime=None) -> FastAPI:
             raise HTTPException(status_code=408, detail='body_timeout') from None
         try:
             return await runtime.webhook(provider, bytes(raw), request.headers)
+        except ConnectionError:
+            raise HTTPException(status_code=503, detail='claim_storage_unavailable') from None
         except ValueError:
             raise HTTPException(status_code=403, detail='invalid_webhook') from None
 

@@ -136,32 +136,88 @@ async def test_close_discards_queued_audio_and_does_not_report_a_spurious_media_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('selected', [False, True])
-async def test_scoped_primary_origination_replaces_only_the_owned_synthetic_provider_leg(monkeypatch, selected):
+@pytest.mark.parametrize('variant', ['current', 'concise', 'primary-ws'])
+async def test_armed_live_call_records_selected_comparison_at_close(monkeypatch, tmp_path, variant):
+    import time
     from diagnostics import scoped_runner
-    from test_runtime import fixtures
+    from test_live import PrimaryLiveEmulator
+    from test_runtime import fixtures, sign
+    from voice_agent.media import AudioBuffer
 
     _, storage, controller, _ = fixtures()
-    controller.app = 'voice-agent'
-    original_originate = controller.originate_local
+    value = snapshot('gpt-live-1')
+    value.update(agent_id='receptionist', destination_id='agent:receptionist')
+    value['debug']['transcription_enabled'] = True
+    storage.snapshot.return_value = value
+    storage.binding.return_value['api_key'] = 'key'
+    caller_id, linkedid, label = 'va' + 'a' * 28, 'va' + 'b' * 28, 'c' * 32
+    controller.get_variable.return_value = linkedid
+    media = SimpleNamespace(input=AudioBuffer(), failed=asyncio.Event(), enable_input=Mock(),
+                            stop_input=Mock(), write=AsyncMock(), flush=AsyncMock(), close=AsyncMock())
+    controller.connect_media_channel.return_value = media
+    monkeypatch.setattr(scoped_runner, 'ROOT', tmp_path)
+    monkeypatch.setattr(scoped_runner, 'ARM', tmp_path / 'arm.json')
+    scoped_runner.ARM.write_text(json.dumps(dict(label=label, agent_channel_id=caller_id,
+        linkedid=linkedid, expires_at=time.time()+50, variant=variant, snapshot_sha256=scoped_runner.fingerprint(value))))
+    emulator = PrimaryLiveEmulator()
+    server = TestServer(emulator.app)
+    await server.start_server()
+    from voice_agent.providers.live import OpenAILiveAdapter
+    url = str(server.make_url('/v1/live/sessions'))
+    monkeypatch.setattr(OpenAILiveAdapter, 'ws_base', url.replace('http:', 'ws:'))
+    monkeypatch.setattr(OpenAILiveAdapter, 'http_base', url)
     runtime = scoped_runner.ScopedRuntime(storage, controller)
-    call = SimpleNamespace(tasks=set())
-    runtime.calls['owned-session'] = call
-    runtime.converse = AsyncMock()
-    monkeypatch.setattr(scoped_runner, 'read_selection', lambda candidate:
-        {'variant': 'primary-ws'} if candidate is call and selected else None)
-    await controller.originate_local('owned-session', 'owned-leg', {'__AGENT_SESSION_ID': 'owned-session'})
-    await asyncio.sleep(0)
-    if selected:
-        original_originate.assert_not_awaited()
-        controller.request.assert_awaited_once()
-        params = controller.request.await_args.kwargs['params']
-        assert params['channelId'] == 'owned-leg' and params['data'] == 'provider,owned-session'
-        assert params['app'] == 'voice-agent' and params['external_host'] == 'INCOMING'
-        assert params['transport'] == 'websocket' and params['connection_type'] == 'server'
-        runtime.converse.assert_awaited_once_with(call)
+    try:
+        await runtime.admit({'id': caller_id, 'dialplan': {'context': 'voice-agent-receptionist'}}, 'receptionist')
+        call, = runtime.calls.values()
+        if variant == 'primary-ws':
+            assert call.binding['adapter'] == 'live_ws'
+            controller.originate_local.assert_not_awaited()
+        else:
+            assert call.binding['adapter'] == 'live'
+            controller.originate_local.assert_awaited_once()
+            await runtime.event({'type': 'StasisStart', 'args': ['provider', call.session_id], 'channel': {'id': call.leg_id}})
+            data = {'session_id': 'live_test', 'type': 'sip', 'sip_headers': [
+                {'name': 'X-OS-Session-ID', 'value': call.session_id},
+                {'name': 'X-OS-Provider-Leg-ID', 'value': call.leg_id},
+                {'name': 'X-OS-Agent-ID', 'value': 'receptionist'}]}
+            body, headers = sign(call, data, event_type='live.transport.incoming')
+            assert await runtime.webhook('openai', body, headers) == {'status': 'accepted'}
+        await eventually(lambda: call.media_connected and call.adapter.commands and
+                         call.adapter.commands[0]['outcome'] == 'acknowledged')
+        assert not call.adapter._capture
+        if variant == 'primary-ws':
+            media.input.append(bytes([128]) * 160)
+            await emulator.ws.send_json({'type': 'session.output_audio.delta',
+                'delta': base64.b64encode(bytes([128]) * 80).decode()})
+            await eventually(lambda: call.adapter.input_stats.samples >= 160 and call.adapter.output_stats.samples == 80)
+            media.write.assert_not_awaited()  # A partial frame has arrived but cannot play yet.
+    finally:
+        for call in list(runtime.calls.values()):
+            await runtime.finish(call, 'completed')
+        await server.close()
+    result = json.loads((tmp_path / ('live-diagnostic-result-' + label + '.json')).read_text())
+    assert result['variant'] == variant
+    assert result['commands'][0]['kind'] == ('session.instructions.append' if variant == 'concise' else 'session.commentary.append')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('probe_parent', [False, True])
+async def test_scoped_private_consultation_follows_parent_call_scope(monkeypatch, probe_parent):
+    from diagnostics import scoped_runner
+    from test_runtime import fixtures
+    _, storage, controller, _ = fixtures()
+    runtime = scoped_runner.ScopedRuntime(storage, controller)
+    parent = SimpleNamespace(caller_id='va' + 'a' * 28 if probe_parent else 'ordinary-caller')
+    call = SimpleNamespace(caller_id='va' + 'b' * 28, private_consultation=SimpleNamespace(caller=parent))
+    converse = AsyncMock()
+    monkeypatch.setattr(scoped_runner.runtime.Runtime, 'converse', converse)
+    monkeypatch.setattr(scoped_runner, 'read_selection', lambda _: None)
+    runtime.finish = AsyncMock()
+    await runtime.converse(call)
+    if probe_parent:
+        runtime.finish.assert_awaited_once_with(call, 'interrupted', 'provider_unavailable', fallback=False)
+        converse.assert_not_awaited()
     else:
-        original_originate.assert_awaited_once()
-        controller.request.assert_not_awaited()
-        runtime.converse.assert_not_awaited()
-    await asyncio.gather(*runtime.tasks, return_exceptions=True)
+        converse.assert_awaited_once_with(call)
+        runtime.finish.assert_not_awaited()

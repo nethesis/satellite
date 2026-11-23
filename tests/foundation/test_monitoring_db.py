@@ -10,12 +10,10 @@ import pytest
 pytestmark = pytest.mark.skipif(not os.getenv('M0_TEST_PORT'), reason='disposable MariaDB not selected')
 
 
-def test_idempotent_projection_and_hourly_histograms(monkeypatch):
+@pytest.fixture
+def monitor_database(monkeypatch):
     import mysql.connector
     import voice_agent.storage as module
-    from voice_agent.telemetry import CallTrace
-    from voice_agent.monitoring import Monitoring, EVENTS
-    from voice_agent.runtime import Call
     @contextmanager
     def database(role):
         assert role == 'monitor'
@@ -29,6 +27,16 @@ def test_idempotent_projection_and_hourly_histograms(monkeypatch):
         finally:
             db.close()
     monkeypatch.setattr(module, 'database', database)
+    return database
+
+
+def test_idempotent_projection_and_hourly_histograms(monitor_database):
+    import mysql.connector
+    import voice_agent.storage as module
+    from voice_agent.telemetry import CallTrace
+    from voice_agent.monitoring import Monitoring, EVENTS
+    from voice_agent.runtime import Call
+    database = monitor_database
     call = Call(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), 'synthetic',
         {'agent_id': 'receptionist', 'workflow_version': 11, 'max_call_duration_seconds': 60},
         {'binding_id': 'synthetic', 'provider': 'openai', 'adapter': 'realtime', 'model': 'synthetic-model'}, None)
@@ -94,3 +102,43 @@ def test_idempotent_projection_and_hourly_histograms(monkeypatch):
         assert cursor.fetchone()=={'outcome':'running','trace_status':'recording'}
         cursor.execute('SELECT state FROM asteriskcdrdb.voice_agent_pending_calls WHERE run_id=%s',(newer.run_id,))
         assert cursor.fetchone()['state']=='pending'
+
+
+def test_pending_claim_retries_and_conflicts(monitor_database):
+    from voice_agent.runtime import Call
+    from voice_agent.storage import ClaimRejected, Storage
+
+    storage = Storage()
+
+    def admit():
+        call = Call(str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), 'caller',
+                    {'agent_id': 'receptionist', 'workflow_version': 1, 'max_call_duration_seconds': 60},
+                    {'binding_id': 'synthetic', 'provider': 'openai', 'adapter': 'realtime'}, None)
+        storage.admit(call)
+        return call
+
+    first, second = admit(), admit()
+    provider_id = str(uuid.uuid4())
+    storage.accept(first, provider_id)
+    storage.accept(first, provider_id)
+    with pytest.raises(ClaimRejected):
+        storage.accept(first, str(uuid.uuid4()))
+    with pytest.raises(ClaimRejected):
+        storage.accept(second, provider_id)
+
+    with monitor_database('monitor') as db, db.cursor() as cursor:
+        cursor.execute(
+            "SELECT p.state, p.provider_call_id, r.provider_call_id "
+            "FROM asteriskcdrdb.voice_agent_pending_calls p "
+            "JOIN asteriskcdrdb.voice_agent_runs r ON r.run_id=p.run_id WHERE p.session_id=%s",
+            (first.session_id,))
+        assert cursor.fetchone() == ('accepted', provider_id, provider_id)
+        cursor.execute("SELECT state, provider_call_id FROM asteriskcdrdb.voice_agent_pending_calls "
+                       "WHERE session_id=%s", (second.session_id,))
+        assert cursor.fetchone() == ('pending', None)
+        cursor.execute("UPDATE asteriskcdrdb.voice_agent_pending_calls SET expires_at=NOW()-INTERVAL 1 SECOND "
+                       "WHERE session_id IN (%s, %s)", (first.session_id, second.session_id))
+    with pytest.raises(ClaimRejected):
+        storage.accept(first, provider_id)
+    with pytest.raises(ClaimRejected):
+        storage.accept(second, str(uuid.uuid4()))

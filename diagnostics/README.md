@@ -3,8 +3,9 @@
 These source-only helpers require an authorized disposable test instance, a
 short-lived arm and a bounded shared provider budget. They are excluded from
 production images and are never imported by the normal runner. The current
-runtime uses primary WebSocket media for GPT-Live; the comparison adapters here
-remain explicit diagnostic variants, not selectable production transports.
+runtime uses primary WebSocket media for GPT-Live. An armed `primary-ws` probe
+measures audio on that transport. The `current` and `concise` probes compare
+greeting commands over the SIP sideband.
 
 `call_probe.py` exercises an owned Local caller through a pre-reviewed test route,
 bridge and loopback externalMedia endpoint. It accepts only bounded synthetic

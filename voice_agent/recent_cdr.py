@@ -87,7 +87,7 @@ def qualify(rows, devices, trunks, caller, rules, zone, earliest, now):
                                 and leg.get('disposition') == 'ANSWERED' and leg.get('billsec', 0) > 0
                                 and target == {'extension:' + match[1]}):
                             recipient.update(target)
-            if (source in trunk_peers and normalize_number(row.get('src')) in variants
+            if (source in trunk_peers and normalize_number(row.get('src')) == caller
                     and row.get('lastapp') in ('Dial', 'Queue', 'Bridge') and row.get('disposition') == 'ANSWERED'
                     and type(row.get('billsec')) is int and row['billsec'] > 0 and len(recipient) == 1):
                 result.append({'destination_id': next(iter(recipient)), 'called_at': at})

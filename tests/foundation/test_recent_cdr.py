@@ -62,6 +62,9 @@ def test_number_rules_are_explicit_and_trunk_specific():
     assert resolve([row(lastdata='PJSIP/90212345678@outbound-test')], rules=rules) == []
     trunk_rule = dict(rules[0], tech='PJSIP', peer='outbound-test')
     assert len(resolve([row(lastdata='PJSIP/90212345678@outbound-test')], rules=[trunk_rule])) == 1
+    # An outbound access prefix is never evidence about an incoming identity.
+    assert resolve([dict(incoming(), src='90212345678')], rules=[trunk_rule]) == []
+    assert len(resolve([incoming()], rules=[trunk_rule])) == 1
 
 
 def test_timezone_lookback_boundary_and_dst_ambiguity():
@@ -88,7 +91,7 @@ def test_real_cdr_views_query_bounds_and_privileges(monkeypatch):
     found = module.Storage().recent_calls(NUMBER, 7)
     assert len(found) == 1 and found[0]['destination_id'] == 'extension:203'
     assert module.Storage().recent_calls('+390200000000', 7) == []
-    conversations = module.Storage().recent_calls('+390212345679', 7)
+    conversations = module.Storage().recent_calls('+39 (02) 1234-5679', 7)
     assert len(conversations) == 1 and conversations[0]['destination_id'] == 'extension:203'
     with pytest.raises(ValueError, match='recent_lookup_overflow'):
         module.Storage().recent_calls('+390212340999', 7)

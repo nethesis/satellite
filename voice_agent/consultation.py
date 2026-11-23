@@ -516,11 +516,11 @@ class Consultations:
             if c.caller.consultation is c:
                 c.caller.consultation = None
 
-    async def cancel(self, call):
+    async def cancel(self, call, *, exclude=None):
         c = call.consultation
         if not c:
             return
-        if c.task and c.task is not asyncio.current_task() and not c.task.done():
+        if c.task and c.task is not (exclude or asyncio.current_task()) and not c.task.done():
             c.task.cancel()
             await asyncio.gather(c.task, return_exceptions=True)
         await self.cleanup(c)

@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 
 from mysql.connector import connect
+from mysql.connector.errors import IntegrityError
+from mysql.connector.errorcode import ER_DUP_ENTRY
 from nacl.secret import SecretBox
 
 
@@ -24,6 +26,10 @@ def database(role):
             connection.commit()
     finally:
         connection.close()
+
+
+class ClaimRejected(ValueError):
+    """The pending call expired or belongs to a different provider claim."""
 
 
 class Storage:
@@ -68,9 +74,9 @@ class Storage:
                     (*variants, earliest.astimezone(zone).replace(tzinfo=None), now.astimezone(zone).replace(tzinfo=None)), examined=500)
                 incoming = bounded(
                     'SELECT ' + columns +
-                    f'FROM asterisk.voice_agent_recent_cdr WHERE src IN ({placeholders}) '
+                    'FROM asterisk.voice_agent_recent_cdr WHERE src = %s '
                     'AND calldate >= %s AND calldate <= %s AND disposition=\'ANSWERED\' AND billsec>0 LIMIT 1001',
-                    (*variants, earliest.astimezone(zone).replace(tzinfo=None), now.astimezone(zone).replace(tzinfo=None)), examined=500)
+                    (caller, earliest.astimezone(zone).replace(tzinfo=None), now.astimezone(zone).replace(tzinfo=None)), examined=500)
                 records = list({(r['uniqueid'], r['sequence']): r for r in records + incoming}.values())
                 if len(records) > 1000:
                     raise ValueError('recent_lookup_overflow')
@@ -149,9 +155,25 @@ class Storage:
     def accept(self, call, provider_call_id):
         with database('monitor') as db:
             with db.cursor() as cursor:
-                cursor.execute("UPDATE asteriskcdrdb.voice_agent_pending_calls p JOIN asteriskcdrdb.voice_agent_runs r ON r.run_id=p.run_id SET p.state='accepted',p.provider_call_id=%s WHERE p.session_id=%s AND p.provider_leg_id=%s AND r.adapter=%s AND p.state='pending' AND p.expires_at>NOW()", (provider_call_id, call.session_id, call.leg_id, call.binding.get('adapter','realtime')))
-                if cursor.rowcount != 1:
-                    raise ValueError('pending_call_expired')
+                cursor.execute(
+                    "SELECT p.state, p.provider_call_id FROM asteriskcdrdb.voice_agent_pending_calls p "
+                    "JOIN asteriskcdrdb.voice_agent_runs r ON r.run_id=p.run_id "
+                    "WHERE p.session_id=%s AND p.provider_leg_id=%s AND p.run_id=%s "
+                    "AND r.adapter=%s AND p.expires_at>NOW(6) FOR UPDATE",
+                    (call.session_id, call.leg_id, call.run_id, call.binding.get('adapter', 'realtime')))
+                claim = cursor.fetchone()
+                if claim == ('accepted', provider_call_id):
+                    return  # A prior attempt committed before its response timed out.
+                if not claim or claim[0] != 'pending':
+                    raise ClaimRejected('pending_call_unavailable')
+                try:
+                    cursor.execute("UPDATE asteriskcdrdb.voice_agent_pending_calls "
+                                   "SET state='accepted', provider_call_id=%s WHERE session_id=%s",
+                                   (provider_call_id, call.session_id))
+                except IntegrityError as error:
+                    if error.errno == ER_DUP_ENTRY:
+                        raise ClaimRejected('provider_call_already_claimed') from None
+                    raise
                 cursor.execute('UPDATE asteriskcdrdb.voice_agent_runs SET provider_call_id=%s WHERE run_id=%s', (provider_call_id, call.run_id))
 
     def media_ownership(self):

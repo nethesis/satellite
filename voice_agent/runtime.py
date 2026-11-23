@@ -23,7 +23,7 @@ from .providers.realtime import ProviderError
 from .models import conversation_capability
 from .contract import validate_snapshot
 from .providers.webhook import verify_webhook
-from .storage import trusted_target
+from .storage import ClaimRejected, trusted_target
 from .tools import ToolRegistry, WIRE_IDS, bounded_caller_name
 
 
@@ -58,6 +58,7 @@ class Call:
     hangup_task: object | None = field(default=None, repr=False)
     caller_left: bool = False
     terminal: bool = False
+    finalizer: asyncio.Task | None = field(default=None, repr=False)
     admitted: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tasks: set = field(default_factory=set)
@@ -210,17 +211,21 @@ class Transfer:
             await asyncio.wait_for(call.transfer_done.wait(), timeout=10)
             call.trace.end(span, "completed" if call.transfer_outcome == "transferred" else "failed")
         except asyncio.CancelledError:
-            call.trace.end(span, 'cancelled', error='transfer_cancelled')
-            self.runtime.monitoring.emit(call.run_id,'transfer_uncertain',error='transfer_cancelled',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
+            if call.transfer_outcome == 'transferred':
+                call.trace.end(span, 'completed')
+            else:
+                call.trace.end(span, 'cancelled', error='transfer_cancelled')
+                self.runtime.monitoring.emit(call.run_id,'transfer_uncertain',error='transfer_cancelled',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
             self.runtime.spawn(self.runtime.finish(call,'failed','transfer_cancelled',fallback=True),call)
             raise
         except Exception:
-            call.trace.end(span, 'failed', error='transfer_unconfirmed')
-            self.runtime.monitoring.emit(call.run_id, 'transfer_uncertain', error='transfer_unconfirmed',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
-            await self.runtime.finish(call, 'failed', 'transfer_unconfirmed', fallback=True)
-            return {'error': 'transfer_uncertain'}
+            if call.transfer_outcome != 'transferred':
+                call.trace.end(span, 'failed', error='transfer_unconfirmed')
+                self.runtime.monitoring.emit(call.run_id, 'transfer_uncertain', error='transfer_unconfirmed',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
+                await self.runtime.finish(call, 'failed', 'transfer_unconfirmed', fallback=True)
+                return {'error': 'transfer_uncertain'}
+            call.trace.end(span, 'completed')
         if call.transfer_outcome == 'transferred':
-            self.runtime.monitoring.emit(call.run_id, 'transfer_committed', outcome='transferred',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
             await self.runtime.finish(call, 'transferred', fallback=False)
             return {'outcome': 'transferred'}
         error = 'voicemail_unavailable' if voicemail_recipient is not None else 'transfer_failed'
@@ -238,6 +243,7 @@ class Runtime:
         self.admitting = set()
         self.admissions = {}
         self.tasks = set()
+        self._cleanup_tasks = set()
         self._webhook_rejection_at = {}
         self._live_admissions = set()
         self.controller.on_event = self.event
@@ -272,16 +278,18 @@ class Runtime:
 
     async def owned_resource(self, call, operation, cleanup):
         """An ARI timeout/cancellation is not proof that creation was aborted."""
-        task = self.spawn(operation)
+        task = asyncio.create_task(operation)
         try:
             result = await asyncio.shield(task)
         except asyncio.CancelledError:
             async def reap():
+                # Even a failed response can follow a successful creation.
+                await asyncio.gather(task, return_exceptions=True)
                 try:
-                    await task
-                finally:
                     await cleanup()
-            self.spawn(reap())
+                except Exception as exc:
+                    LOG.warning('Late ARI resource cleanup failed: %s', type(exc).__name__)
+            self._start_cleanup(reap())
             raise
         except Exception:
             # The server may have committed before the response was lost. IDs
@@ -292,6 +300,16 @@ class Runtime:
             await cleanup()
             raise asyncio.CancelledError
         return result
+
+    def _start_cleanup(self, operation):
+        task = asyncio.create_task(operation)
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+        return task
+
+    async def _drain_cleanup(self):
+        while self._cleanup_tasks:
+            await asyncio.shield(asyncio.gather(*self._cleanup_tasks, return_exceptions=True))
 
     async def start(self):
         try:
@@ -306,10 +324,11 @@ class Runtime:
 
     async def stop(self):
         self.stopping = True
-        await asyncio.gather(*(self.finish(c, 'interrupted', 'runtime_stopped', fallback=True) for c in list(self.calls.values())))
+        await self._finish_calls('runtime_stopped')
         for task in list(self.tasks):
             task.cancel()
         await asyncio.gather(*list(self.tasks), return_exceptions=True)
+        await self._drain_cleanup()
         await self.controller.stop()
         await self.transcripts.stop()
         await self.monitoring.stop()
@@ -350,12 +369,14 @@ class Runtime:
                     continue
                 if channel['id'] not in {c.caller_id for c in self.calls.values()}:
                     await self.controller.continue_channel(channel['id'], {'context':context,'extension':'s','label':'fallback'})
-            if isinstance(owned_media, dict) and owned_media:
+            owned_bridges = {'livews-' + session for session in owned_media.values()}
+            owned_bridges.update('sip-' + session for session in owned_sessions)
+            owned_bridges.difference_update(c.bridge_id for c in self.calls.values())
+            if owned_bridges:
                 bridges = await self.controller.list_bridges()
                 if isinstance(bridges, list):
-                    owned_bridges = {'livews-' + session for session in owned_media.values()}
                     for bridge in bridges:
-                        if bridge.get('id') in owned_bridges and not bridge.get('channels'):
+                        if bridge.get('id') in owned_bridges and bridge.get('channels') == []:
                             await self.controller.destroy_bridge(bridge['id'])
             return
         channel = event.get('channel') or {}
@@ -379,7 +400,7 @@ class Runtime:
                     await self.controller.hangup(channel_id)
             elif len(args) == 2 and args[0] == 'caller':
                 if channel_id not in self.admitting and not any(c.caller_id == channel_id for c in self.calls.values()):
-                    if len(self.calls) + len(self.admitting) >= 32 or self.stopping:
+                    if len(self.calls) + len(self.admitting) >= 32 or self.stopping or not self.controller.connected:
                         await self.controller.continue_channel(channel_id)
                         return
                     self.admitting.add(channel_id)
@@ -434,6 +455,9 @@ class Runtime:
                 LOG.warning('Voice agent phase=provider_channel error_code=%s',reason)
                 self.spawn(self.finish(call, 'fallback', reason, fallback=True), call)
 
+    def live_transport(self, caller_id, linkedid, snapshot):
+        return 'live_ws'
+
     async def admit(self, channel, agent_id):
         call = None
         origin = time.monotonic()
@@ -459,8 +483,11 @@ class Runtime:
                 raise ValueError('provider_mismatch')
             capability = conversation_capability(snapshot['provider'], snapshot['conversation'])
             binding = {**binding, 'model': snapshot['conversation']['model'], 'adapter': capability['adapter']}
+            linkedid = await self.controller.get_variable(channel['id'], 'CHANNEL(linkedid)')
+            if linkedid is not None and (not isinstance(linkedid, str) or len(linkedid) > 128 or not linkedid.isascii()):
+                linkedid = None
             if binding['adapter'] == 'live':
-                binding['adapter'] = 'live_ws'
+                binding['adapter'] = self.live_transport(channel['id'], linkedid, snapshot)
             observations.append(('binding', binding_started, time.monotonic()))
             if binding.get('adapter') == 'live_ws':
                 value = os.getenv('VOICE_AGENT_LIVE_WS_MAX_CALLS', '4') or '4'
@@ -469,9 +496,6 @@ class Runtime:
                 if active + len(self._live_admissions) >= limit:
                     raise ValueError('media_capacity_exceeded')
                 self._live_admissions.add(channel['id'])
-            linkedid = await self.controller.get_variable(channel['id'], 'CHANNEL(linkedid)')
-            if linkedid is not None and (not isinstance(linkedid, str) or len(linkedid) > 128 or not linkedid.isascii()):
-                linkedid = None
             call = Call(str(uuid.uuid4()), str(uuid.uuid4()), new_channel_id(), channel['id'], copy.deepcopy(snapshot), copy.deepcopy(binding), linkedid)
             if binding.get('adapter') == 'live_ws':
                 call.leg_id = 'vw' + secrets.token_hex(14)
@@ -502,6 +526,10 @@ class Runtime:
             stage='run_storage'
             await asyncio.wait_for(asyncio.to_thread(self.storage.admit, call), timeout=10)
             call.admitted=True
+            if self.stopping or not self.controller.connected:
+                reason = 'runtime_stopped' if self.stopping else 'ari_disconnected'
+                await self.finish(call, 'interrupted', reason, fallback=True)
+                return
             for phase, start, end in observations:
                 call.trace.record(phase, start, end)
             call.trace.record('admission', origin, time.monotonic())
@@ -530,7 +558,8 @@ class Runtime:
                 return
             stage='origination'
             async with call.trace.measure('origination'):
-                await self.controller.originate_local(call.session_id, call.leg_id, variables)
+                await self.owned_resource(call, self.controller.originate_local(call.session_id, call.leg_id, variables),
+                                          lambda: self.controller.hangup(call.leg_id))
         except asyncio.CancelledError:
             if call:
                 await self.finish(call, 'interrupted', 'setup_cancelled', fallback=True)
@@ -626,8 +655,10 @@ class Runtime:
                 return {'status':'duplicate' if hmac.compare_digest(call.provider_call_id,call_id) else 'ignored'}
             try:
                 await asyncio.wait_for(asyncio.to_thread(self.storage.accept,call,call_id),timeout=5)
-            except Exception:
+            except ClaimRejected:
                 return {'status':'ignored'}
+            except Exception as error:
+                raise ConnectionError('claim_storage_unavailable') from error
             call.provider_call_id = call_id
             self.trace(call).end(call.webhook_span)
         self.spawn(self.converse(call), call)
@@ -704,8 +735,9 @@ class Runtime:
                     return
                 stage='media_bridge'
                 async with trace.measure('media_bridge'):
-                    call.bridge_id = str(uuid.uuid4())
-                    await self.controller.create_bridge(call.bridge_id)
+                    call.bridge_id = 'sip-' + call.session_id
+                    await self.owned_resource(call, self.controller.create_bridge(call.bridge_id),
+                                              lambda: self.controller.destroy_bridge(call.bridge_id))
                     await self.controller.add_to_bridge(call.bridge_id, [call.caller_id,call.leg_id])
             self.monitoring.emit(call.run_id,'provider_connected',elapsed_ms=self.trace(call).elapsed())
             # The runtime owns the deadline and must route fallback while the caller
@@ -855,18 +887,30 @@ class Runtime:
         await asyncio.sleep(max(0, call.hangup_deadline - time.monotonic()))
         await self.finish(call, 'ended_by_agent', fallback=False)
 
-    async def finish(self, call, outcome, error=None, fallback=False):
+    async def finish(self, call, outcome, error=None, fallback=False, *, join=False):
+        async with call.lock:
+            if call.finalizer is None:
+                call.terminal = True
+                call.finalizer = self._start_cleanup(self._finalize(
+                    call, outcome, error, fallback, asyncio.current_task()))
+            elif not join:
+                # Call tasks can re-enter finish while the finalizer cancels and
+                # drains them. Only external lifecycle callers join that work.
+                return
+        await asyncio.shield(call.finalizer)
+
+    async def _finalize(self, call, outcome, error, fallback, initiator):
         if call.text_only:
             fallback = False
-        async with call.lock:
-            if call.terminal:
-                return
-            call.terminal = True
-            if call.ending_by_agent:
-                outcome, fallback = 'ended_by_agent', False
+        if call.transfer_released and call.transfer_confirmed:
+            outcome, error, fallback = 'transferred', None, False
+            self.monitoring.emit(call.run_id, 'transfer_committed', outcome=outcome, tool_id='pbx.transfer',
+                                 destination_id=call.transfer_destination_id, elapsed_ms=self.trace(call).elapsed())
+        elif call.ending_by_agent:
+            outcome, fallback = 'ended_by_agent', False
         consultation = call.consultation
         if consultation:
-            await self.consultations.cancel(call)
+            await self.consultations.cancel(call, exclude=initiator)
             # A concurrent shutdown/provider failure may have begun before the
             # consultation committed to native ownership. Never compete with it.
             if consultation.transferred or consultation.uncertain or (consultation.releasing and consultation.native_started):
@@ -876,7 +920,7 @@ class Runtime:
                 error = None if consultation.transferred else 'transfer_uncertain'
         if call.private_consultation:
             await self.consultations.private_ended(call.private_consultation, call)
-        if call.hangup_task and call.hangup_task is not asyncio.current_task():
+        if call.hangup_task and call.hangup_task is not initiator:
             call.hangup_task.cancel()
             await asyncio.gather(call.hangup_task, return_exceptions=True)
         trace = self.trace(call)
@@ -898,14 +942,14 @@ class Runtime:
                 cleanup_failed = True
                 outcome, error = 'failed', 'hangup_failed'
         for task in list(call.tasks):
-            if task is not asyncio.current_task():
+            if task is not initiator:
                 task.cancel()
         try:
             await self.quiesce_media(call)
         except Exception:
             cleanup_failed = True
         if call.tools:
-            await call.tools.close(exclude=asyncio.current_task())
+            await call.tools.close(exclude=initiator)
         if call.recent:
             await call.recent.close()
         call.caller_number = None
@@ -974,4 +1018,13 @@ class Runtime:
         self.calls.pop(call.session_id,None)
 
     async def disconnected(self):
-        await asyncio.gather(*(self.finish(call,'interrupted','ari_disconnected',fallback=True) for call in list(self.calls.values())))
+        await self._finish_calls('ari_disconnected')
+        await self._drain_cleanup()
+
+    async def _finish_calls(self, reason):
+        # Admissions still committing to storage check readiness before promotion.
+        # Keep REST available until these and already-admitted calls have finalized.
+        await asyncio.gather(
+            asyncio.gather(*self.admissions.values(), return_exceptions=True),
+            *(self.finish(call, 'interrupted', reason, fallback=True, join=True)
+              for call in list(self.calls.values())))

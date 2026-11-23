@@ -128,7 +128,8 @@ class AriController:
                 self._queue.task_done()
 
     async def request(self, method, path, *, params=None, json_body=None):
-        if self._session is None or not self.connected:
+        # The event socket can be down while the REST endpoint still serves cleanup.
+        if self._session is None or self._session.closed:
             raise ConnectionError("Agent ARI unavailable")
         async with self._session.request(method, f"{self.url}/ari{path}",
                                          params=params, json=json_body,
