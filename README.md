@@ -131,13 +131,13 @@ This requires the `vector` extension (pgvector) in your Postgres instance.
 
 1. Ensure Asterisk is configured with the appropriate ARI settings
 2. Make sure your MQTT broker is running
-3. Run the application: `python main.py`. It starts voice agents on their private
-   listener. Set `VOICE_AGENT_RUNTIME_TOKEN` and use `VOICE_AGENT_ENABLED=true`
-   with the existing MariaDB/ARI configuration to admit agent calls. Set either
-   `SATELLITE_CALL_TRANSCRIPTION_ENABLED=true` or
-   `SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED=true` to start transcription and
-   its existing HTTP API. Both HTTP bind addresses must be loopback. The two
-   components use separate ARI applications; `ARI_APP` must not be `voice-agent`.
+3. Run the application with `python main.py`. Set `VOICE_AGENT_ENABLED=true`
+   and `VOICE_AGENT_RUNTIME_TOKEN` with the MariaDB and ARI configuration to
+   start the private voice-agent listener and admit calls. Transcription and
+   its HTTP API start when both transcription flags are absent, or when either
+   `SATELLITE_CALL_TRANSCRIPTION_ENABLED` or `SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED`
+   is true. Both HTTP bind addresses must be loopback. Set `ARI_APP` to the
+   transcription service's own Stasis application.
 4. Configure Asterisk dialplan to direct calls to the Stasis application named "satellite"
 5. Send an MQTT message to the topic `transcription/control` with payload `{"action":"start", "uniqueid":"[CALL_UNIQUEID]"}` or `{"action":"start", "linkedid":"[CALL_UNIQUEID]"}`
 6. Stop the trascription with MQTT message to the topic `transcription/control` with payload `{"action":"stop", "uniqueid":"[CALL_UNIQUEID]"}` or `{"action":"stop", "linkedid":"[CALL_UNIQUEID]"}`

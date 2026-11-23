@@ -30,7 +30,8 @@ def resources(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_transcription_pipeline_starts_and_cleans_up(resources):
+async def test_transcription_pipeline_starts_and_cleans_up(resources, monkeypatch):
+    monkeypatch.delenv('ARI_APP')
     stop = asyncio.Event()
     rtp, mqtt, ari = resources
     ari.connect.side_effect = stop.set
@@ -39,6 +40,7 @@ async def test_transcription_pipeline_starts_and_cleans_up(resources):
     mqtt.connect.assert_awaited_once()
     mqtt.subscribe.assert_awaited_once_with('transcription/control')
     ari.connect.assert_awaited_once()
+    assert transcription.AsteriskBridge.call_args.kwargs['app'] == 'asterisk_dialogflow'
     control = mqtt.set_callback.call_args.args[0]
     await control('ignored', {'action': 'start', 'linkedid': 'call-id'})
     await control('ignored', {'action': 'stop', 'uniqueid': 'call-id'})
@@ -154,10 +156,12 @@ def free_port():
         return listener.getsockname()[1]
 
 
-@pytest.mark.parametrize('call,voicemail', [('False', 'False'), ('True', 'False'),
-                                          ('False', 'True'), ('True', 'True')])
+@pytest.mark.parametrize('voice,call,voicemail', [
+    (False, None, None), (False, 'False', 'False'), (True, 'False', 'False'),
+    (True, 'True', 'False'), (True, 'False', 'True'), (True, 'True', 'True'),
+])
 @pytest.mark.parametrize('stop_signal', [signal.SIGTERM, signal.SIGINT])
-def test_single_process_endpoints_and_shutdown(tmp_path, call, voicemail, stop_signal):
+def test_single_process_endpoints_and_shutdown(tmp_path, voice, call, voicemail, stop_signal):
     agent_port, api_port = free_port(), free_port()
     while api_port == agent_port:
         api_port = free_port()
@@ -165,34 +169,49 @@ def test_single_process_endpoints_and_shutdown(tmp_path, call, voicemail, stop_s
            if not key.startswith(('PGVECTOR_', 'VOICE_AGENT_', 'SATELLITE_'))
            and key not in ('GOOGLE_APPLICATION_CREDENTIALS', 'OPENAI_API_KEY')}
     env.update(VOICE_AGENT_HTTP_PORT=str(agent_port), VOICE_AGENT_HTTP_HOST='127.0.0.1',
-               VOICE_AGENT_ENABLED='false', VOICE_AGENT_RUNTIME_TOKEN='synthetic-token',
                HTTP_HOST='127.0.0.1', HTTP_PORT=str(api_port), API_TOKEN='synthetic-api',
-               SATELLITE_CALL_TRANSCRIPTION_ENABLED=call,
-               SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED=voicemail,
-               DEEPGRAM_API_KEY='synthetic-deepgram', MQTT_URL='mqtt://127.0.0.1:1',
+               ASTERISK_URL='http://127.0.0.1:1', ARI_USERNAME='synthetic-ari',
+               ARI_APP='satellite', DEEPGRAM_API_KEY='synthetic-deepgram', MQTT_URL='mqtt://127.0.0.1:1',
                RTP_HOST='127.0.0.1', RTP_PORT='0', LOG_LEVEL='WARNING')
-    enabled = 'True' in (call, voicemail)
+    if voice:
+        env.update(VOICE_AGENT_ENABLED='true', VOICE_AGENT_RUNTIME_TOKEN='synthetic-token',
+                   SATELLITE_ARI_PASSWORD='synthetic-ari')
+    if call is not None:
+        env.update(SATELLITE_CALL_TRANSCRIPTION_ENABLED=call,
+                   SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED=voicemail)
+    enabled = (call is None and voicemail is None) or 'True' in (call, voicemail)
     process = subprocess.Popen([sys.executable, str(Path(main.__file__))], cwd=tmp_path,
                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         with httpx.Client(timeout=0.3, trust_env=False) as client:
             agent_url = f'http://127.0.0.1:{agent_port}'
             api_url = f'http://127.0.0.1:{api_port}'
+            def wait_for_signal_handlers():
+                # The no-listener configuration still needs to handle both signals.
+                status = Path(f'/proc/{process.pid}/status').read_text()
+                caught = next(line.split()[1] for line in status.splitlines() if line.startswith('SigCgt:'))
+                return int(caught, 16) & (1 << (signal.SIGTERM - 1))
+
             deadline = time.monotonic() + 15
             while True:
                 assert process.poll() is None, process.communicate()
                 try:
-                    if client.get(agent_url + '/internal/ready').status_code == 401:
-                        if not enabled or client.get(api_url + '/metrics').status_code == 401:
-                            break
+                    if ((not voice or client.get(agent_url + '/internal/ready').status_code == 401)
+                            and (not enabled or client.get(api_url + '/metrics').status_code == 401)
+                            and wait_for_signal_handlers()):
+                        break
                 except httpx.TransportError:
                     pass
                 assert time.monotonic() < deadline, 'HTTP startup timed out'
                 time.sleep(0.05)
-            assert client.get(agent_url + '/internal/ready', headers={
-                'Authorization': 'Bearer synthetic-token'}).status_code == 200
-            assert client.get(agent_url + '/api/get_transcription').status_code == 404
-            assert client.post(agent_url + '/satellite-webhooks/unexpected').status_code == 404
+            if voice:
+                assert client.get(agent_url + '/internal/ready', headers={
+                    'Authorization': 'Bearer synthetic-token'}).status_code == 200
+                assert client.get(agent_url + '/api/get_transcription').status_code == 404
+                assert client.post(agent_url + '/satellite-webhooks/unexpected').status_code == 404
+            else:
+                with pytest.raises(httpx.TransportError):
+                    client.get(agent_url + '/internal/ready')
             if enabled:
                 assert client.get(api_url + '/metrics', headers={'X-API-Token': 'synthetic-api'}).status_code == 200
                 assert client.get(api_url + '/internal/ready').status_code == 404
@@ -226,6 +245,7 @@ async def test_transcription_recovery_preserves_running_agent_calls(resources, m
     agent_port, api_port = free_port(), free_port()
     monkeypatch.setenv('VOICE_AGENT_HTTP_PORT', str(agent_port))
     monkeypatch.setenv('VOICE_AGENT_HTTP_HOST', '127.0.0.1')
+    monkeypatch.setenv('VOICE_AGENT_ENABLED', 'true')
     monkeypatch.setenv('HTTP_PORT', str(api_port))
     monkeypatch.setenv('HTTP_HOST', '127.0.0.1')
     monkeypatch.setenv('SATELLITE_CALL_TRANSCRIPTION_ENABLED', 'True')
@@ -272,16 +292,76 @@ async def test_transcription_recovery_preserves_running_agent_calls(resources, m
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('conflict', ['http', 'ari'])
-async def test_listener_and_ari_ownership_collisions_fail_before_start(monkeypatch, conflict):
-    monkeypatch.setenv('VOICE_AGENT_ENABLED', 'false')
-    monkeypatch.setenv('VOICE_AGENT_RUNTIME_TOKEN', 'synthetic-token')
-    monkeypatch.setenv('SATELLITE_CALL_TRANSCRIPTION_ENABLED', 'True')
-    monkeypatch.setenv('HTTP_HOST', '127.0.0.1')
+@pytest.mark.parametrize('failure', ['settings', 'lifespan', 'bind', 'collision'])
+async def test_voice_startup_failure_preserves_transcription(resources, monkeypatch, caplog, failure):
+    from types import SimpleNamespace
+    from voice_agent.runner import create_app
+
+    rtp, _, ari = resources
+    connected = asyncio.Event()
+    ari.connect.side_effect = connected.set
+    runtime = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+    if failure == 'lifespan':
+        runtime.start.side_effect = RuntimeError('synthetic startup failure')
+    monkeypatch.setattr(main, 'app_from_env', lambda: create_app(
+        '' if failure == 'settings' else 'synthetic-token', runtime))
+    api_port, agent_port = free_port(), free_port()
+    while api_port == agent_port:
+        agent_port = free_port()
+    monkeypatch.setenv('VOICE_AGENT_ENABLED', 'true')
     monkeypatch.setenv('VOICE_AGENT_HTTP_HOST', '127.0.0.1')
-    monkeypatch.setenv('VOICE_AGENT_HTTP_PORT', '8701')
-    monkeypatch.setenv('HTTP_PORT', '8701' if conflict == 'http' else '8702')
-    monkeypatch.setenv('ARI_APP', 'voice-agent' if conflict == 'ari' else 'satellite')
-    with pytest.raises(ValueError, match='http_listener_collision' if conflict == 'http'
-                       else 'transcription_ari_app_must_differ'):
+    monkeypatch.setenv('HTTP_HOST', '127.0.0.1')
+    monkeypatch.setenv('HTTP_PORT', str(api_port))
+    monkeypatch.setenv('API_TOKEN', 'synthetic-api')
+    monkeypatch.setenv('SATELLITE_CALL_TRANSCRIPTION_ENABLED', 'true')
+    stop = asyncio.Event()
+    with socket.socket() as occupied:
+        if failure == 'bind':
+            occupied.bind(('127.0.0.1', agent_port))
+            occupied.listen()
+        monkeypatch.setenv('VOICE_AGENT_HTTP_PORT', str(api_port if failure == 'collision' else agent_port))
+        application = asyncio.create_task(main.run(stop))
+        try:
+            await asyncio.wait_for(connected.wait(), 3)
+            async with httpx.AsyncClient(timeout=0.5, trust_env=False) as client:
+                async with asyncio.timeout(3):
+                    while 'voice-agents ' not in caplog.text:
+                        await asyncio.sleep(0.01)
+                    while True:
+                        try:
+                            response = await client.get(f'http://127.0.0.1:{api_port}/metrics',
+                                                        headers={'X-API-Token': 'synthetic-api'})
+                            assert response.status_code == 200
+                            break
+                        except httpx.TransportError:
+                            await asyncio.sleep(0.01)
+            assert not application.done()
+            rtp.stop.assert_not_awaited()
+        finally:
+            stop.set()
+            await asyncio.wait_for(application, 3)
+    rtp.stop.assert_awaited_once()
+    if failure in ('lifespan', 'bind'):
+        runtime.start.assert_awaited_once()
+        runtime.stop.assert_awaited_once()
+    else:
+        runtime.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_only_enabled_component_failure_is_fatal(monkeypatch):
+    from voice_agent.runner import create_app
+
+    monkeypatch.setenv('VOICE_AGENT_ENABLED', 'true')
+    monkeypatch.setenv('SATELLITE_CALL_TRANSCRIPTION_ENABLED', 'false')
+    monkeypatch.setenv('SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED', 'false')
+    monkeypatch.setattr(main, 'app_from_env', lambda: create_app(''))
+    with pytest.raises(RuntimeError, match='All configured Satellite components stopped'):
         await main.run()
+
+
+@pytest.mark.asyncio
+async def test_transcription_cannot_use_voice_agent_ari_app(resources, monkeypatch):
+    monkeypatch.setenv('ARI_APP', 'voice-agent')
+    with pytest.raises(ValueError, match='transcription_ari_app_must_differ'):
+        await transcription.run(asyncio.Event())

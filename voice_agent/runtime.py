@@ -51,6 +51,8 @@ class Call:
     transfer_destination_id: str | None = None
     transfer_outcome: str | None = None
     transfer_token: str | None = None
+    transfer_task: asyncio.Task | None = field(default=None, repr=False)
+    transfer_release_requested: bool = False
     transfer_released: bool = False
     transfer_confirmed: bool = False
     ending_by_agent: bool = False
@@ -188,8 +190,17 @@ class Transfer:
             call.transfer_destination_id = destination_id
             call.transfer_target = target
             call.transfer_token = uuid.uuid4().hex
+            call.transfer_task = self.runtime.spawn(
+                self._run_native_transfer(permitted, voicemail_recipient), call)
+        return await asyncio.shield(call.transfer_task)
+
+    async def _run_native_transfer(self, permitted, voicemail_recipient):
+        call = self.call
+        tool_id = 'pbx.transfer'
+        destination_id = call.transfer_destination_id
         self.runtime.monitoring.emit(call.run_id, 'transfer_requested',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
         span = self.runtime.trace(call).start('transfer', parent=ACTIVE_SPAN.get(), tool_id=tool_id)
+        continued = False
         try:
             # Preserve a passive subscription after Stasis ends. The native wrapper
             # acknowledges the exact destination with this one-use private token.
@@ -207,7 +218,13 @@ class Transfer:
                 self.runtime.monitoring.emit(call.run_id, 'tool_denied' if error == 'destination_denied' else 'transfer_failed', error=error, tool_id=tool_id, destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
                 await self.runtime.finish(call, 'fallback', error, fallback=True)
                 return {'error': error}
-            await self.runtime.controller.continue_channel(call.caller_id, target)
+            call.transfer_release_requested = True
+            try:
+                await self.runtime.controller.continue_channel(call.caller_id, call.transfer_target)
+                continued = True
+            except Exception:
+                # The native dialplan can run before a lost REST response.
+                pass
             await asyncio.wait_for(call.transfer_done.wait(), timeout=10)
             call.trace.end(span, "completed" if call.transfer_outcome == "transferred" else "failed")
         except asyncio.CancelledError:
@@ -216,13 +233,20 @@ class Transfer:
             else:
                 call.trace.end(span, 'cancelled', error='transfer_cancelled')
                 self.runtime.monitoring.emit(call.run_id,'transfer_uncertain',error='transfer_cancelled',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
-            self.runtime.spawn(self.runtime.finish(call,'failed','transfer_cancelled',fallback=True),call)
+            await self.runtime.finish(call, 'failed', 'transfer_cancelled', fallback=not call.transfer_release_requested)
             raise
         except Exception:
             if call.transfer_outcome != 'transferred':
                 call.trace.end(span, 'failed', error='transfer_unconfirmed')
                 self.runtime.monitoring.emit(call.run_id, 'transfer_uncertain', error='transfer_unconfirmed',tool_id=tool_id,destination_id=destination_id,elapsed_ms=self.runtime.trace(call).elapsed())
-                await self.runtime.finish(call, 'failed', 'transfer_unconfirmed', fallback=True)
+                fallback = not call.transfer_release_requested
+                if call.transfer_release_requested and not continued and not call.caller_left:
+                    try:
+                        fallback = await asyncio.wait_for(self.runtime.controller.caller_in_stasis(
+                            call.caller_id, call.snapshot['agent_id']), timeout=2) is True
+                    except Exception:
+                        pass
+                await self.runtime.finish(call, 'failed', 'transfer_unconfirmed', fallback=fallback)
                 return {'error': 'transfer_uncertain'}
             call.trace.end(span, 'completed')
         if call.transfer_outcome == 'transferred':
@@ -338,8 +362,14 @@ class Runtime:
         if kind == 'AgentAriConnected':
             # A media channel has no voice-agent-provider dialplan context.
             # Match persisted ownership and trusted channel markers instead.
-            owned_media = await asyncio.to_thread(self.storage.media_ownership)
-            owned_sessions = await asyncio.to_thread(self.storage.consultation_ownership)
+            try:
+                owned_media, owned_sessions = await asyncio.wait_for(asyncio.gather(
+                    asyncio.to_thread(self.storage.media_ownership),
+                    asyncio.to_thread(self.storage.consultation_ownership),
+                ), timeout=4)
+            except Exception as exc:
+                LOG.warning('Voice agent ownership recovery unavailable: %s', type(exc).__name__)
+                return
             # Only recover channels belonging to this app and these generated contexts.
             for channel in await self.controller.list_channels():
                 session = owned_media.get(channel['id']) if isinstance(owned_media, dict) else None
@@ -363,11 +393,17 @@ class Runtime:
                 if context in ('voice-agent-consult','voice-agent-handoff','voice-agent-handoff-wait','voice-agent-voicemail'):
                     continue
                 if context == 'voice-agent-provider':
-                    await self.controller.hangup(channel['id'])
+                    if not any(c.leg_id == channel['id'] for c in self.calls.values()):
+                        await self.controller.hangup(channel['id'])
                     continue
                 if not re.fullmatch(r'voice-agent-[a-z][a-z0-9_-]{0,47}', context):
                     continue
-                if channel['id'] not in {c.caller_id for c in self.calls.values()}:
+                # New Stasis callers can appear while recovery is running.
+                agent_id = context.removeprefix('voice-agent-')
+                if (dialplan.get('app_data') == f'voice-agent,caller,{agent_id}'
+                        and await self.controller.get_variable(channel['id'], 'VOICE_AGENT_ID') == agent_id
+                        and channel['id'] not in self.admitting
+                        and not any(c.caller_id == channel['id'] for c in self.calls.values())):
                     await self.controller.continue_channel(channel['id'], {'context':context,'extension':'s','label':'fallback'})
             owned_bridges = {'livews-' + session for session in owned_media.values()}
             owned_bridges.update('sip-' + session for session in owned_sessions)
@@ -458,6 +494,9 @@ class Runtime:
     def live_transport(self, caller_id, linkedid, snapshot):
         return 'live_ws'
 
+    def load_snapshot(self, agent_id):
+        return validate_snapshot(self.storage.snapshot(agent_id))
+
     async def admit(self, channel, agent_id):
         call = None
         origin = time.monotonic()
@@ -469,8 +508,8 @@ class Runtime:
                 raise ValueError('invalid_agent')
             if (channel.get('dialplan') or {}).get('context') != 'voice-agent-' + agent_id:
                 raise ValueError('invalid_entrypoint')
-            snapshot = await asyncio.wait_for(asyncio.to_thread(self.storage.snapshot, agent_id), timeout=5)
-            snapshot = validate_snapshot(snapshot)
+            await self.controller.set_variable(channel['id'], 'VOICE_AGENT_ID', agent_id)
+            snapshot = await asyncio.wait_for(asyncio.to_thread(self.load_snapshot, agent_id), timeout=5)
             if snapshot.get('role') == 'consultation':
                 raise ValueError('internal_agent_not_public')
             observations.append(('snapshot', origin, time.monotonic()))
@@ -507,7 +546,8 @@ class Runtime:
             call.caller_name = bounded_caller_name((channel.get('caller') or {}).get('name'))
             if snapshot.get('consultation', {}).get('mode') == 'attended':
                 try:
-                    assistant = validate_snapshot(await asyncio.wait_for(asyncio.to_thread(self.storage.snapshot, snapshot['consultation']['assistant_id']), 5))
+                    assistant = await asyncio.wait_for(asyncio.to_thread(
+                        self.load_snapshot, snapshot['consultation']['assistant_id']), timeout=5)
                     if assistant.get('role') != 'consultation':
                         raise ValueError('invalid_internal_assistant')
                     internal_binding = await asyncio.wait_for(asyncio.to_thread(self.storage.binding, assistant['provider_binding_id']), 5)
@@ -541,7 +581,10 @@ class Runtime:
                 call.tasks.add(asyncio.current_task())
             stage='tool_catalog'
             definitions=await asyncio.wait_for(asyncio.to_thread(self.storage.tools),timeout=5)
-            call.tools = ToolRegistry(snapshot, self.storage.routing_targets, Transfer(self, call),definitions, recent=call.recent)
+            call.tools = await asyncio.to_thread(
+                ToolRegistry, snapshot, self.storage.routing_targets, Transfer(self, call), definitions, recent=call.recent)
+            if call.terminal:
+                return
             self.monitoring.emit(call.run_id, 'admitted',elapsed_ms=self.trace(call).elapsed())
             self.spawn(self.deadline(call, 30, setup=True), call)
             self.spawn(self.deadline(call, max(0,call.deadline-time.monotonic())), call)
@@ -553,9 +596,6 @@ class Runtime:
                 raise ValueError('invalid_provider_user')
             variables = {'__AGENT_SESSION_ID':call.session_id,'__AGENT_PROVIDER_LEG_ID':call.leg_id,
                          '__VOICE_AGENT_ID':agent_id,'__AGENT_PROVIDER_HOST':'sip.api.openai.com' if binding['provider']=='openai' else 'sip.voice.x.ai','__AGENT_PROVIDER_USER':user,'__AGENT_PROVIDER_TRUNK':binding['trunk_name']}
-            await self.controller.set_variable(call.caller_id, 'VOICE_AGENT_ID', agent_id)
-            if call.terminal:
-                return
             stage='origination'
             async with call.trace.measure('origination'):
                 await self.owned_resource(call, self.controller.originate_local(call.session_id, call.leg_id, variables),
@@ -889,15 +929,24 @@ class Runtime:
 
     async def finish(self, call, outcome, error=None, fallback=False, *, join=False):
         async with call.lock:
-            if call.finalizer is None:
+            transfer = call.transfer_task
+            if call.finalizer is not None:
+                # Call tasks can re-enter finish while the finalizer cancels and
+                # drains them. Only external lifecycle callers join that work.
+                if not join:
+                    return
+                cleanup = call.finalizer
+            elif transfer and transfer is not asyncio.current_task() and not transfer.done():
+                # The native handoff owns the caller until its bounded result.
+                if not join:
+                    return
+                cleanup = transfer
+            else:
                 call.terminal = True
                 call.finalizer = self._start_cleanup(self._finalize(
                     call, outcome, error, fallback, asyncio.current_task()))
-            elif not join:
-                # Call tasks can re-enter finish while the finalizer cancels and
-                # drains them. Only external lifecycle callers join that work.
-                return
-        await asyncio.shield(call.finalizer)
+                cleanup = call.finalizer
+        await asyncio.shield(cleanup)
 
     async def _finalize(self, call, outcome, error, fallback, initiator):
         if call.text_only:
@@ -906,6 +955,8 @@ class Runtime:
             outcome, error, fallback = 'transferred', None, False
             self.monitoring.emit(call.run_id, 'transfer_committed', outcome=outcome, tool_id='pbx.transfer',
                                  destination_id=call.transfer_destination_id, elapsed_ms=self.trace(call).elapsed())
+        elif call.transfer_released:
+            fallback = False
         elif call.ending_by_agent:
             outcome, fallback = 'ended_by_agent', False
         consultation = call.consultation
@@ -958,14 +1009,7 @@ class Runtime:
                 await self.controller.unsubscribe_channel(call.caller_id)
             except Exception:
                 cleanup_failed = True
-        if fallback and call.transfer_released:
-            # ARI cannot continue a channel outside Stasis. Fail closed if the
-            # native owner could not be positively confirmed after release.
-            try:
-                await self.controller.hangup(call.caller_id)
-            except Exception:
-                fallback_failed = True
-        elif fallback:
+        if fallback:
             try:
                 await self.controller.continue_channel(call.caller_id, {'context':'voice-agent-fallback-'+hashlib.sha256((call.snapshot['agent_id']+'\0'+call.snapshot['fallback_destination_id']).encode()).hexdigest()[:24], 'extension':'s', 'priority':1})
             except Exception:
@@ -973,10 +1017,12 @@ class Runtime:
                 try:
                     await self.controller.continue_channel(call.caller_id)
                 except Exception:
-                    try:
-                        await self.controller.hangup(call.caller_id)
-                    except Exception:
-                        pass
+                    # A lost continue response may follow a successful handoff.
+                    if not call.transfer_release_requested:
+                        try:
+                            await self.controller.hangup(call.caller_id)
+                        except Exception:
+                            pass
         trace.end(fallback_span, 'failed' if fallback_failed else 'completed',error='fallback_failed' if fallback_failed else None)
         if not call.text_only:
             try:

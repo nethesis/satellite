@@ -19,9 +19,9 @@ def create_app(token: str, runtime=None) -> FastAPI:
         raise ValueError('runtime_token_required')
     @asynccontextmanager
     async def lifespan(app):
-        if runtime:
-            await runtime.start()
         try:
+            if runtime:
+                await runtime.start()
             yield
         finally:
             if runtime:

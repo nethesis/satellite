@@ -16,9 +16,13 @@ The runner validates contract, provider capability and trusted tool definitions
 before paid provider usage. The conversation's model and voice belong to the
 agent; stale trunk model settings cannot override them. Direct extensions are
 initially disabled, queues enabled, callbacks enabled for seven
-days, and call ending disabled. Callback evidence is short-lived and bound to
-the inbound caller, live session, agent and publication. A model cannot supply
-an authoritative number or turn a direct destination into callback evidence.
+days, and call ending disabled. Callbacks require an extension on the published
+allowlist, even when direct extension dialing is disabled. The callback denylist
+can further exclude extensions. Callback evidence is short-lived and bound to
+the inbound caller number, live session, agent and publication. The number is
+supplied by the PBX and may be spoofed on trunks that accept unverified caller
+ID. Enable callbacks only for routes where revealing the approved contacts is
+acceptable. The model cannot supply a different number for the lookup.
 IVR routing is removed: directories, model advertisements and transfer execution
 support extensions and queues only. Existing v8 IVR fields are inert and do not
 authorize transfers. Native administrator-selected fallback routing is unchanged.
@@ -53,18 +57,20 @@ invented as zero. Metadata retention defaults to 90 days, controlled by
 has a separate 1–24 hour lifetime. Audio is never persisted by the media bridge.
 
 `python main.py` starts the shared application and binds the voice-agent HTTP
-listener to loopback. The standalone `python -m voice_agent.runner` remains for
+listener to loopback when `VOICE_AGENT_ENABLED=true`. The standalone
+`python -m voice_agent.runner` remains for
 agent-only diagnostics and the standalone image. Set
 `VOICE_AGENT_RUNTIME_TOKEN` for authenticated `/internal/ready`; documentation and
 configuration routes are absent. Traefik forwards only the provider webhook prefix;
 exact provider routes verify raw bytes, timestamps and pending-call correlation.
-`VOICE_AGENT_ENABLED=true` permits call admission. NS8 generates private credentials
-and starts voice agents even when transcription is disabled. The shared process
-starts transcription and its separate private API only when either existing
-transcription flag is true. Each component owns a different ARI application;
-transcription connection failures retry without restarting agent calls. Shutdown
-closes both listeners, RTP/ARI/MQTT resources and per-request workers. Keep Python
-on 3.12.13.
+NS8 generates private credentials and starts voice agents even when transcription
+is disabled. The shared process starts transcription and its separate private API
+when both transcription flags are absent or either flag is true. Each component
+owns a different ARI application. Transcription connection failures retry without
+restarting agent calls. A stopped component is logged and the others keep
+running. The process exits with an error if every configured component stops
+unexpectedly. Shutdown closes both listeners, RTP/ARI/MQTT resources and
+per-request workers. Keep Python on 3.12.13.
 
 NethVoice currently wraps the published Satellite PR #56 image, pinned by digest
 in `build-images.sh`, and checks out its matching source revision in CI.
@@ -88,9 +94,9 @@ metrics. The sibling NethVoice `freepbx/tests/agents/run-foundation.sh`
 prepares disposable MariaDB, applies the fresh baseline repeatedly, tests grants and
 restore, and runs paired contracts. Without this harness DB-specific cases skip.
 The standalone image starts only the runner as UID/GID 65532. The normal image
-uses `python main.py` for the shared lifecycle. Set
-`SATELLITE_CALL_TRANSCRIPTION_ENABLED=true` or
-`SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED=true` to start transcription.
+uses `python main.py` for the shared lifecycle. Set both
+`SATELLITE_CALL_TRANSCRIPTION_ENABLED` and
+`SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED` to false to disable transcription.
 The NethVoice image pin must be refreshed after these changes are published; its
 old PR image is rejected by the shared-lifecycle import check.
 Diagnostics remain in the source tree and are excluded from production images.

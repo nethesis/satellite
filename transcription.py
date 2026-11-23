@@ -11,6 +11,9 @@ logger = logging.getLogger("transcription")
 
 
 async def run(shutdown_event):
+    ari_app = os.getenv("ARI_APP", "asterisk_dialogflow")
+    if ari_app == "voice-agent":
+        raise ValueError("transcription_ari_app_must_differ_from_voice_agents")
     if not os.getenv("DEEPGRAM_API_KEY"):
         logger.error("DEEPGRAM_API_KEY is not set; realtime transcription is unavailable")
         await shutdown_event.wait()
@@ -20,9 +23,6 @@ async def run(shutdown_event):
         logger.error("Google Cloud credentials file not found")
         await shutdown_event.wait()
         return
-    if os.getenv("ARI_APP", "satellite") == "voice-agent":
-        raise ValueError("transcription_ari_app_must_differ_from_voice_agents")
-
     while not shutdown_event.is_set():
         rtp = RTPServer(host=os.getenv("RTP_HOST", "0.0.0.0"),
                         port=int(os.getenv("RTP_PORT", "10000")),
@@ -33,7 +33,7 @@ async def run(shutdown_event):
                           username=os.getenv("MQTT_USERNAME"),
                           password=os.getenv("SATELLITE_MQTT_PASSWORD"))
         bridge = AsteriskBridge(url=os.getenv("ASTERISK_URL", "http://localhost:8088"),
-                                app=os.getenv("ARI_APP", "asterisk_dialogflow"),
+                                app=ari_app,
                                 username=os.getenv("ARI_USERNAME", "asterisk"),
                                 password=os.getenv("SATELLITE_ARI_PASSWORD", "asterisk"),
                                 mqtt_client=mqtt, rtp_server=rtp)

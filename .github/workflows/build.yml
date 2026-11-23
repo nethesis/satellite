@@ -8,7 +8,6 @@ on:
       nethvoice_ref:
         description: Companion NethVoice revision for contract tests
         required: false
-        default: voice_agents
 
 permissions:
   contents: read
@@ -31,11 +30,12 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: nethesis/ns8-nethvoice
-          ref: ${{ inputs.nethvoice_ref || ((github.head_ref || github.ref_name) == 'voice_agents_attended_transfer' && 'voice_agents_attended_transfer' || (github.ref_name == 'main' && 'main' || 'voice_agents')) }}
+          # Paired revisions from ns8-nethvoice PRs #1120 and #1071.
+          ref: ${{ inputs.nethvoice_ref || ((github.head_ref || github.ref_name) == 'voice_agents_attended_transfer' && '350a2f62e69a544b62ba4d8135d54dc48b49570a' || 'df2f623fbe65d6a0eadf57f1a80ebed12372d94c') }}
           path: ns8-nethvoice
 
       - name: Set up PHP contract validator
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.2'
           extensions: mbstring, sodium

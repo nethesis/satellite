@@ -12,11 +12,13 @@ class RoutingPolicy:
     def recent_enabled(self):
         return bool(self.binding and self.binding['enabled']
                     and self.binding['config'].get('recent_callers_enabled')
+                    and self.binding['config']['extension_allowlist']
                     and self.lookup and self.lookup['enabled'])
 
     def permits_recent(self, destination_id):
         return bool(self.recent_enabled() and isinstance(destination_id, str)
                     and re.fullmatch(r'extension:[0-9]{1,20}', destination_id)
+                    and destination_id in self.binding['config']['extension_allowlist']
                     and destination_id not in self.binding['config']['recent_caller_denylist'])
 
     def permits(self, destination_id):

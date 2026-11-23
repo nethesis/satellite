@@ -75,6 +75,7 @@ class AriController:
     async def _run(self):
         delay = 1
         while not self._stopping:
+            recovery = None
             try:
                 url = self.url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
                 async with self._session.ws_connect(
@@ -87,7 +88,7 @@ class AriController:
                     # A reconnect can leave Stasis channels from the previous owner.
                     # The runtime reconciles only channels with Agent ownership vars.
                     if self.on_event:
-                        await self.on_event({"type": "AgentAriConnected"})
+                        recovery = asyncio.create_task(self._recover())
                     async for message in ws:
                         if message.type == aiohttp.WSMsgType.TEXT:
                             try:
@@ -107,12 +108,28 @@ class AriController:
                 self._ws = None
                 was_connected = self.connected
                 self.connected = False
+                if recovery is not None:
+                    recovery.cancel()
+                    await asyncio.gather(recovery, return_exceptions=True)
+                if was_connected and not self._stopping:
+                    # A final StasisEnd and its native acknowledgement may
+                    # already be queued when the peer closes the socket.
+                    try:
+                        await asyncio.wait_for(self._queue.join(), timeout=1)
+                    except TimeoutError:
+                        pass
                 self._generation += 1
                 if was_connected and not self._stopping and self.on_disconnect:
                     await self.on_disconnect()
             if not self._stopping:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
+
+    async def _recover(self):
+        try:
+            await asyncio.wait_for(self.on_event({"type": "AgentAriConnected"}), timeout=10)
+        except Exception as exc:
+            LOG.warning("Agent ARI ownership recovery failed: %s", type(exc).__name__)
 
     async def _events(self):
         while True:
@@ -122,8 +139,8 @@ class AriController:
                     await self.on_event(event)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                LOG.warning("Agent ARI event handler failed")
+            except Exception as exc:
+                LOG.warning("Agent ARI event handler failed: %s", type(exc).__name__)
             finally:
                 self._queue.task_done()
 
@@ -275,6 +292,13 @@ class AriController:
         if "exten" in params:
             params["extension"] = params.pop("exten")
         await self.request("POST", f"/channels/{quote(channel_id, safe='')}/continue", params=params)
+
+    async def caller_in_stasis(self, channel_id, agent_id):
+        channel = await self.request('GET', '/channels/' + quote(channel_id, safe=''))
+        dialplan = channel.get('dialplan') or {}
+        return (dialplan.get('context') == 'voice-agent-' + agent_id
+                and dialplan.get('app_name') == 'Stasis'
+                and dialplan.get('app_data') == f'{self.app},caller,{agent_id}')
 
     async def hangup_owned(self, channel_id):
         application = await self.request('GET', '/applications/' + quote(self.app, safe=''))

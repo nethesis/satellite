@@ -185,19 +185,73 @@ async def test_native_ack_alone_does_not_commit_until_release():
 
 
 @pytest.mark.asyncio
-async def test_unconfirmed_released_channel_is_hung_up_instead_of_continued():
+async def test_unconfirmed_released_channel_is_left_with_native_dialplan():
     runtime, storage, controller, snapshot = fixtures()
     call = await admit(runtime)
     call.transfer_target = {'context':'voice-agent-transfer','extension':'203','priority':1}
     call.transfer_released = True
     await runtime.finish(call,'failed','transfer_unconfirmed',fallback=True)
-    controller.hangup.assert_any_await(call.caller_id)
+    controller.hangup.assert_awaited_once_with(call.leg_id)
     controller.continue_channel.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_disconnect_preserves_confirmed_transfer_while_continue_is_in_flight():
+@pytest.mark.parametrize('released', [False, True], ids=['before-release', 'after-release'])
+async def test_native_transfer_owns_caller_during_provider_failure_and_deadline(released):
     runtime, _, controller, _ = fixtures()
+    call = await admit(runtime)
+    transfer = asyncio.create_task(Transfer(runtime, call).transfer('extension:203'))
+    await transfer_started(controller)
+    if released:
+        await runtime.event({'type': 'StasisEnd', 'channel': {'id': call.caller_id}})
+    await runtime.event({'type': 'ChannelDestroyed', 'channel': {'id': call.leg_id}})
+    await runtime.finish(call, 'fallback', 'duration_exceeded', fallback=True)
+    await asyncio.sleep(0)
+    assert not call.terminal
+    controller.hangup.assert_not_awaited()
+    if not released:
+        await runtime.event({'type': 'StasisEnd', 'channel': {'id': call.caller_id}})
+    await runtime.event({'type': 'ChannelUserevent', 'eventname': 'VoiceAgentTransfer',
+                         'channel': {'id': call.caller_id}, 'userevent': {
+                             'token': call.transfer_token, 'destination_id': 'extension:203'}})
+    assert await transfer == {'outcome': 'transferred'}
+    controller.hangup.assert_awaited_once_with(call.leg_id)
+    assert controller.continue_channel.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lost_native_continue_response_never_hangs_up_the_caller():
+    runtime, _, controller, _ = fixtures()
+    call = await admit(runtime)
+    # None of the REST replies or socket events can establish caller ownership.
+    controller.continue_channel.side_effect = TimeoutError
+    assert await Transfer(runtime, call).transfer('extension:203') == {'error': 'transfer_uncertain'}
+    controller.hangup.assert_awaited_once_with(call.leg_id)
+    assert not runtime.calls
+
+
+@pytest.mark.asyncio
+async def test_native_confirmation_can_follow_a_lost_continue_response():
+    runtime, _, controller, _ = fixtures()
+    call = await admit(runtime)
+    controller.continue_channel.side_effect = TimeoutError
+    transfer = asyncio.create_task(Transfer(runtime, call).transfer('extension:203'))
+    await transfer_started(controller)
+    assert not call.terminal
+    await runtime.event({'type': 'StasisEnd', 'channel': {'id': call.caller_id}})
+    await runtime.event({'type': 'ChannelUserevent', 'eventname': 'VoiceAgentTransfer',
+                         'channel': {'id': call.caller_id}, 'userevent': {
+                             'token': call.transfer_token, 'destination_id': 'extension:203'}})
+    assert await transfer == {'outcome': 'transferred'}
+    controller.hangup.assert_awaited_once_with(call.leg_id)
+    controller.continue_channel.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stopping', [False, True], ids=['disconnect', 'shutdown'])
+async def test_lifecycle_waits_for_native_transfer_while_continue_is_in_flight(stopping):
+    runtime, _, controller, _ = fixtures()
+    runtime.monitoring.stop = AsyncMock()
     call = await admit(runtime)
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -209,11 +263,17 @@ async def test_disconnect_preserves_confirmed_transfer_while_continue_is_in_flig
     transfer = asyncio.create_task(Transfer(runtime, call).transfer('extension:203'))
     try:
         await asyncio.wait_for(entered.wait(), 2)
+        teardown = asyncio.create_task(runtime.stop() if stopping else runtime.disconnected())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not call.terminal
         await runtime.event({'type': 'StasisEnd', 'channel': {'id': call.caller_id}})
         await runtime.event({'type': 'ChannelUserevent', 'eventname': 'VoiceAgentTransfer',
                              'channel': {'id': call.caller_id}, 'userevent': {
                                  'token': call.transfer_token, 'destination_id': 'extension:203'}})
-        await runtime.disconnected()
+        assert not teardown.done()
+        release.set()
+        await asyncio.wait_for(teardown, 2)
         controller.hangup.assert_awaited_once_with(call.leg_id)
         assert controller.continue_channel.await_count == 1
         assert any(e['event_type'] == 'completed' and e['outcome'] == 'transferred'
@@ -268,6 +328,96 @@ async def test_event_socket_drop_allows_runtime_cleanup_over_http():
     assert ('POST', f'/ari/channels/{call.caller_id}/continue') in requests
     assert ('DELETE', f'/ari/channels/{call.leg_id}') in requests
     assert ('DELETE', '/ari/bridges/sip-bridge') in requests
+
+
+@pytest.mark.asyncio
+async def test_ari_connection_handles_call_when_ownership_recovery_database_is_down():
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+    from voice_agent.ari import AriController
+
+    runtime, storage, _, _ = fixtures()
+    storage.media_ownership.side_effect = ConnectionError('database unavailable')
+    storage.snapshot.side_effect = ConnectionError('database unavailable')
+    continued = asyncio.Event()
+    connections = []
+
+    async def events(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        connections.append(ws)
+        await ws.send_json({'type': 'StasisStart', 'args': ['caller', 'basic_voice'], 'channel': {
+            'id': 'caller', 'dialplan': {'context': 'voice-agent-basic_voice'}}})
+        async for _ in ws:
+            pass
+        return ws
+
+    async def fallback(request):
+        continued.set()
+        return web.Response(status=204)
+
+    async def set_variable(request):
+        return web.Response(status=204)
+
+    app = web.Application()
+    app.router.add_get('/ari/events', events)
+    app.router.add_post('/ari/channels/caller/continue', fallback)
+    app.router.add_post('/ari/channels/caller/variable', set_variable)
+    async with TestServer(app) as server:
+        controller = AriController(str(server.make_url('/')), 'user', 'test', on_event=runtime.event)
+        runtime.controller = controller
+        await controller.start()
+        try:
+            await asyncio.wait_for(continued.wait(), 2)
+            assert controller.connected and len(connections) == 1
+            storage.snapshot.assert_called_once_with('basic_voice')
+            await asyncio.gather(*runtime.admissions.values())
+        finally:
+            await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_ari_receives_queued_transfer_events_before_disconnect_cleanup():
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+    from voice_agent.ari import AriController
+
+    disconnected = asyncio.Event()
+    release = asyncio.Event()
+    received = []
+
+    async def events(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        for kind in ('StasisEnd', 'ChannelUserevent'):
+            await ws.send_json({'type': kind})
+        await ws.close()
+        return ws
+
+    async def on_event(event):
+        if event['type'] != 'AgentAriConnected':
+            await release.wait()
+            received.append(event['type'])
+
+    async def on_disconnect():
+        received.append('disconnect')
+        disconnected.set()
+
+    app = web.Application()
+    app.router.add_get('/ari/events', events)
+    async with TestServer(app) as server:
+        controller = AriController(str(server.make_url('/')), 'user', 'test', on_event=on_event,
+                                   on_disconnect=on_disconnect)
+        await controller.start()
+        try:
+            async with asyncio.timeout(2):
+                while controller._generation == 0 or controller.connected:
+                    await asyncio.sleep(.01)
+            release.set()
+            await asyncio.wait_for(disconnected.wait(), 2)
+            assert received == ['StasisEnd', 'ChannelUserevent', 'disconnect']
+        finally:
+            await controller.stop()
 
 
 @pytest.mark.asyncio
@@ -434,16 +584,20 @@ async def test_hangup_reaps_sip_resource_before_shutdown_or_reconnect(resource, 
 
 
 @pytest.mark.asyncio
-async def test_cancelled_transfer_schedules_safe_cleanup():
-    runtime, storage, controller, snapshot = fixtures()
+async def test_cancelled_tool_waiter_does_not_cancel_native_transfer():
+    runtime, _, controller, _ = fixtures()
     call = await admit(runtime)
-    transfer = asyncio.create_task(Transfer(runtime,call).transfer('extension:203'))
+    transfer = asyncio.create_task(Transfer(runtime, call).transfer('extension:203'))
     await transfer_started(controller)
     transfer.cancel()
-    await asyncio.gather(transfer,return_exceptions=True)
-    await asyncio.wait_for(asyncio.gather(*list(runtime.tasks),return_exceptions=True), 2)
-    assert call.terminal
-    assert controller.continue_channel.await_args.args[1]['context'].startswith('voice-agent-fallback-')
+    with pytest.raises(asyncio.CancelledError):
+        await transfer
+    await runtime.event({'type': 'StasisEnd', 'channel': {'id': call.caller_id}})
+    await runtime.event({'type': 'ChannelUserevent', 'eventname': 'VoiceAgentTransfer',
+                         'channel': {'id': call.caller_id}, 'userevent': {
+                             'token': call.transfer_token, 'destination_id': 'extension:203'}})
+    assert await call.transfer_task == {'outcome': 'transferred'}
+    controller.hangup.assert_awaited_once_with(call.leg_id)
 
 
 @pytest.mark.asyncio
@@ -547,8 +701,14 @@ async def test_caller_hangup_cancels_admission_before_provider_origination():
 @pytest.mark.asyncio
 async def test_restart_recovery_touches_only_owned_stasis_channels():
     runtime, storage, controller, snapshot = fixtures()
+    async def ownership(channel, variable):
+        assert variable == 'VOICE_AGENT_ID'
+        return 'internal' if channel == 'owned' else None
+
+    controller.get_variable.side_effect = ownership
     controller.list_channels.return_value=[
         {'id':'unrelated','dialplan':{'context':'voice-agent-internal','app_name':'Dial','app_data':'PJSIP/test'}},
+        {'id':'fresh','dialplan':{'context':'voice-agent-internal','app_name':'Stasis','app_data':'voice-agent,caller,internal'}},
         {'id':'owned','dialplan':{'context':'voice-agent-internal','app_name':'Stasis','app_data':'voice-agent,caller,internal'}},
         {'id':'old-provider','dialplan':{'context':'voice-agent-provider','app_name':'Stasis','app_data':'voice-agent,provider,old'}},
     ]

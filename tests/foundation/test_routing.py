@@ -236,9 +236,8 @@ async def test_typed_uncertain_handoff_never_reports_success(released):
     assert result == {'error': 'transfer_uncertain'}
     assert call.terminal
     assert not any(e['event_type'] == 'transfer_committed' for e in runtime.monitoring.queue._queue)
-    if released:
-        controller.hangup.assert_any_await(call.caller_id)
-        assert controller.continue_channel.await_count == 1
+    controller.hangup.assert_awaited_once_with(call.leg_id)
+    assert controller.continue_channel.await_count == 1
 
 
 @pytest.mark.asyncio

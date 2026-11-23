@@ -12,6 +12,9 @@ import uvicorn
 from voice_agent.runner import app_from_env, settings
 
 
+logger = logging.getLogger(__name__)
+
+
 def api_server_settings():
     host = os.getenv("HTTP_HOST", "127.0.0.1")
     if not ipaddress.ip_address(host).is_loopback:
@@ -22,47 +25,80 @@ def api_server_settings():
 
 async def run(shutdown_event=None):
     shutdown_event = shutdown_event or asyncio.Event()
-    host, port = settings()
-    servers = [uvicorn.Server(uvicorn.Config(
-        app_from_env(), host=host, port=port, access_log=False,
-        log_level=os.getenv("LOG_LEVEL", "info").lower(), timeout_graceful_shutdown=10))]
-    transcription_task = None
-    if any(os.getenv(name, "").lower() == "true" for name in (
-            "SATELLITE_CALL_TRANSCRIPTION_ENABLED", "SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED")):
+    flags = [os.getenv(name) for name in (
+        "SATELLITE_CALL_TRANSCRIPTION_ENABLED", "SATELLITE_VOICEMAIL_TRANSCRIPTION_ENABLED")]
+    transcription_enabled = all(flag is None for flag in flags) or any(
+        flag is not None and flag.lower() == "true" for flag in flags)
+    servers = {}
+
+    async def serve(name, app, **config):
+        if shutdown_event.is_set():
+            return
+        server = uvicorn.Server(uvicorn.Config(
+            app, **config, lifespan="on", timeout_graceful_shutdown=10))
+        # This application owns signals for both listeners.
+        server.capture_signals = nullcontext
+        servers[name] = server
+        try:
+            await server.serve()
+        except SystemExit as error:
+            raise RuntimeError(f"HTTP server exited with status {error.code}") from error
+        finally:
+            del servers[name]
+
+    async def serve_api():
         from api import app
-        from transcription import run as transcribe
-        api_settings = api_server_settings()
-        if (api_settings["host"], api_settings["port"]) == (host, port):
+        await serve("transcription-api", app, **api_server_settings())
+
+    async def serve_voice_agents():
+        host, port = settings()
+        api_server = servers.get("transcription-api")
+        if api_server is not None and (ipaddress.ip_address(host), port) == (
+                ipaddress.ip_address(api_server.config.host), api_server.config.port):
             raise ValueError("http_listener_collision")
-        if os.getenv("ARI_APP") == "voice-agent":
-            raise ValueError("transcription_ari_app_must_differ_from_voice_agents")
-        servers.append(uvicorn.Server(uvicorn.Config(
-            app, **api_settings, timeout_graceful_shutdown=10)))
-        transcription_task = asyncio.create_task(transcribe(shutdown_event), name="transcription")
+        await serve("voice-agents", app_from_env(), host=host, port=port, access_log=False,
+                    log_level=os.getenv("LOG_LEVEL", "info").lower())
+
+    async def run_transcription():
+        from transcription import run as transcribe
+        await transcribe(shutdown_event)
 
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, shutdown_event.set)
-    # Only this application owns signals; neither HTTP server replaces its handlers.
-    for server in servers:
-        server.capture_signals = nullcontext
-    tasks = [asyncio.create_task(server.serve()) for server in servers]
+
+    tasks = []
+    if transcription_enabled:
+        tasks.append(asyncio.create_task(serve_api(), name="transcription-api"))
+        tasks.append(asyncio.create_task(run_transcription(), name="transcription"))
+    if os.getenv("VOICE_AGENT_ENABLED") == "true":
+        tasks.append(asyncio.create_task(serve_voice_agents(), name="voice-agents"))
     stopping = asyncio.create_task(shutdown_event.wait())
     try:
-        watched = [stopping, *tasks]
-        if transcription_task:
-            watched.append(transcription_task)
-        done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            task.result()
+        if not tasks:
+            await stopping
+            return
+        running = set(tasks)
+        while not shutdown_event.is_set():
+            done, _ = await asyncio.wait(running | {stopping}, return_when=asyncio.FIRST_COMPLETED)
+            if shutdown_event.is_set():
+                break
+            running.difference_update(done)
+            for task in done:
+                try:
+                    task.result()
+                except (Exception, asyncio.CancelledError):
+                    logger.exception("%s failed", task.get_name())
+                else:
+                    logger.error("%s stopped unexpectedly", task.get_name())
+            if not running:
+                raise RuntimeError("All configured Satellite components stopped")
     finally:
         shutdown_event.set()
-        for server in servers:
+        for server in servers.values():
             server.should_exit = True
         stopping.cancel()
-        await asyncio.gather(*tasks, stopping,
-                             *([transcription_task] if transcription_task else []),
-                             return_exceptions=True)
+        await asyncio.gather(*tasks, stopping, return_exceptions=True)
         for signum in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(signum)
 

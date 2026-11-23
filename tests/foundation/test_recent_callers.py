@@ -22,7 +22,7 @@ def snapshot():
     transfer = value['tool_bindings'][1]
     transfer.update(tool_version=2, enabled=True)
     transfer['config'].update(recent_callers_enabled=True, recent_caller_lookback_days=7,
-                              recent_caller_denylist=[])
+                              recent_caller_denylist=[], extension_allowlist=['extension:203', 'extension:204'])
     return value
 
 
@@ -39,8 +39,11 @@ async def test_callback_overrides_only_direct_extension_setting():
     value = snapshot()
     controller = AsyncMock()
     controller.transfer.return_value = {'outcome': 'transferred'}
-    recent = resolver(value)
-    registry = ToolRegistry(value, rows, controller, recent=recent)
+    at = datetime.now(timezone.utc) - timedelta(hours=2)
+    recent = resolver(value, [{'destination_id': 'extension:204', 'called_at': at},
+                              {'destination_id': 'extension:205', 'called_at': at}])
+    inventory = lambda: [*rows(), {'id': 'extension:205', 'name': 'Unapproved'}]
+    registry = ToolRegistry(value, inventory, controller, recent=recent)
     page = await registry.invoke('lookup', 'pbx.find_recent_callers', {})
     assert [c['name'] for c in page['candidates']] == ['Private']
     ref = page['candidates'][0]['candidate_ref']
@@ -50,15 +53,17 @@ async def test_callback_overrides_only_direct_extension_setting():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('disabled', ['master', 'recent', 'lookup'])
+@pytest.mark.parametrize('disabled', ['master', 'recent', 'lookup', 'empty_allowlist'])
 async def test_disabled_callback_cannot_be_invoked_by_wire_name(disabled):
     value = snapshot()
     if disabled == 'master':
         value['tool_bindings'][1]['enabled'] = False
     elif disabled == 'recent':
         value['tool_bindings'][1]['config']['recent_callers_enabled'] = False
-    else:
+    elif disabled == 'lookup':
         value['tool_bindings'][2]['enabled'] = False
+    else:
+        value['tool_bindings'][1]['config']['extension_allowlist'] = []
     registry = ToolRegistry(value, rows, AsyncMock(), recent=resolver(value))
     assert 'nv_pbx_find_recent_callers_v1' not in [m['name'] for m in registry.advertised()]
     assert registry.recent_callback_context() == ''
@@ -110,6 +115,7 @@ async def test_multiple_contacts_pagination_dedup_exclusions_and_minimal_data():
     matches += [dict(matches[1], called_at=now - timedelta(days=1))]
     value = snapshot()
     value['tool_bindings'][1]['config']['recent_caller_denylist'] = ['extension:200']
+    value['tool_bindings'][1]['config']['extension_allowlist'] = [row['id'] for row in inventory]
     recent = resolver(value, matches)
     first = await recent.lookup({}, inventory)
     second = await recent.lookup({'offset': first['next_offset']}, inventory)
