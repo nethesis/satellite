@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> This repository is archived. The source code now lives in [nethesis/ns8-nethvoice](https://github.com/nethesis/ns8-nethvoice/tree/main/satellite) and is built and released with the NethVoice module. Open issues and pull requests there.
+
 # Satellite
 
 Satellite is a Python application that creates a bridge between Asterisk PBX and Deepgram speech recognition services. It connects to Asterisk ARI (Asterisk REST Interface) and waits for channels to enter stasis. When a channel enters stasis with the application name "satellite", it creates a snoop channel and sends external media to its RTP server address. The RTP server distinguishes various channels from the UDP source port, captures the audio, and forwards it to Deepgram for real-time speech-to-text transcription. Transcription results are then published to an MQTT broker for further processing.
